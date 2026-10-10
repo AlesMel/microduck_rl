@@ -55,10 +55,10 @@ RETURN_START, RETURN_END = 0.40, 0.62   # stand-up gates (robotd hands over at 0
 # ── Object placement (robot yaw frame) ────────────────────────────────────────
 # Static pose study (notes/ground-grasp/poses): at a 60° beak pitch the lips land 9-13 cm in front of the feet.
 OBJECT_NOMINAL_XY = (0.10, 0.0)      # from the standing root; the study's 60° lips span 8-11.5 cm from the feet
+# Rémi (2026-10-10): "I would rather have a small area that succeeds a lot than a large area that doesn't" -> the
+# placement noise stays at +-1 cm (R1b/R2 widened it to +-2 cm from iteration 1200).
 OBJECT_NOISE_STAGES = [
     {"step": 0, "noise_xy": (0.01, 0.01)},
-    {"step": 600 * 24, "noise_xy": (0.015, 0.015)},
-    {"step": 1200 * 24, "noise_xy": (0.02, 0.02)},
 ]
 OBJECT_HALF_SCALE = (0.7, 1.3)       # x the nominal 1.0 x 1.0 x 0.8 cm half-extents: 1.4-2.6 cm wide, 1.1-2.1 cm tall
 OBJECT_MASS_SCALE = (0.4, 2.0)       # x 12 g
@@ -72,6 +72,8 @@ RESET_JOINT_NOISE = 0.10
 GRASP_POINT_HOME_B = (0.061, 0.0, 0.101)
 
 # ── Variant knobs ──────────────────────────────────────────────────────────────
+BEAK_BISECTOR_WEIGHT = 3.0          # Gaussian (std 10°) on the bisector at 90° in the final descent and the bite
+APPROACH_LATERAL_WEIGHT = 4.0       # per m/s of sideways beak speed in the last 5 cm above the object
 BEAK_PITCH_PREF_WEIGHT = 0.0         # >0: Gaussian pull of the beak pitch toward BEAK_PITCH_TARGET in the grasp window
 BEAK_PITCH_TARGET = 60.0
 
@@ -167,12 +169,23 @@ def make_microduck_ground_grasp_env_cfg(
         params={"command_name": "twist", "phase_end": CLOSE_END, "max_dist": 0.04},
     )
     cfg.rewards["head_floor_impact"] = RewardTermCfg(
-        func=microduck_mdp.body_impact_cost, weight=-0.5,
+        func=microduck_mdp.body_impact_cost, weight=-1.5,
         params={"sensor_name": "head_floor_contact", "threshold": 1.0},
     )
     cfg.rewards["jaw_floor_impact"] = RewardTermCfg(
         func=microduck_mdp.body_impact_cost, weight=-0.5,
         params={"sensor_name": "jaw_floor_contact", "threshold": 3.0},
+    )
+    # Rémi's "beak from the sky": the open beak's bisector vertical during the final descent and the bite
+    # (head pitch + jaw opening / 2 = 90°), and the last 5 cm straight down (no sideways sweep into the object).
+    cfg.rewards["beak_bisector"] = RewardTermCfg(
+        func=microduck_mdp.beak_bisector_pref, weight=BEAK_BISECTOR_WEIGHT,
+        params={"command_name": "twist", "target_deg": 90.0, "std_deg": 10.0,
+                "phase_start": HOVER_AT, "phase_end": CLOSE_START + 0.03},
+    )
+    cfg.rewards["approach_lateral"] = RewardTermCfg(
+        func=microduck_mdp.approach_lateral_speed_penalty, weight=APPROACH_LATERAL_WEIGHT,
+        params={"command_name": "twist", "height": 0.05, "phase_end": CLOSE_START},
     )
     # Anti-whip: checkpoint r1b-750 dropped into the crouch with a knee at 11.5 rad/s (XL330 top speed ~10-12);
     # 22 % of its pick ticks had a joint above 6 rad/s. Free below 5 rad/s.

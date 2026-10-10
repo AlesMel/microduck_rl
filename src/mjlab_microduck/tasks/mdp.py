@@ -8059,3 +8059,47 @@ def joint_overspeed_penalty(
     asset = env.scene[asset_cfg.name]
     v = _servo_joint_vel(env, asset)
     return -torch.clamp(v.abs() - threshold, min=0.0).pow(2).sum(-1)
+
+
+def beak_bisector(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Angle of the open beak's bisector below horizontal, degrees: head pitch + jaw opening / 2 (the plane halfway
+    between the upper mandible and the jaw). 90 = Rémi's "beak from the sky": the mouth opens straight at the floor."""
+    return beak_pitch(env) + 0.5 * torch.rad2deg(mouth_angle_obs(env).squeeze(-1))
+
+
+def beak_bisector_pref(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    target_deg: float = 90.0,
+    std_deg: float = 10.0,
+    phase_start: float = 0.20,
+    phase_end: float = 0.33,
+) -> torch.Tensor:
+    """Gaussian on the beak bisector around target_deg during the final descent and the bite."""
+    phase = _gp_phase(env, command_name)
+    gate = ((phase >= phase_start) & (phase < phase_end)).float()
+    return gate * torch.exp(-((beak_bisector(env) - target_deg) / std_deg) ** 2)
+
+
+def approach_lateral_speed_penalty(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    height: float = 0.05,
+    phase_end: float = 0.30,
+    asset_name: str = "object",
+) -> torch.Tensor:
+    """-horizontal speed (m/s) of the grasp point while it is less than `height` above the object centre and the
+    mouth has not started closing. Self-negating (<= 0): POSITIVE weight. The last centimetres must come straight
+    down, or the beak sweeps the object (Rémi: "it goes sideways and then the beak collides with the ground")."""
+    c = _gg_cache(env)
+    gp = _gg_grasp_point(env)
+    prev = c.get("gp_prev")
+    c["gp_prev"] = gp.clone()
+    if prev is None or prev.shape != gp.shape:
+        return torch.zeros(env.num_envs, device=env.device)
+    v = torch.norm(gp[:, :2] - prev[:, :2], dim=-1) / env.step_dt
+    v = torch.where(env.episode_length_buf <= 1, torch.zeros_like(v), v)       # no jump across a reset
+    obj: Entity = env.scene[asset_name]
+    above = gp[:, 2] - obj.data.root_link_pos_w[:, 2]
+    gate = ((above < height) & (_gp_phase(env, command_name) < phase_end)).float()
+    return -gate * torch.clamp(v, max=1.0)

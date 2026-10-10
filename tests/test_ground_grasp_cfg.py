@@ -117,10 +117,11 @@ def test_env_steps_on_cpu_with_61_obs_14_actions():
     assert env.action_manager.total_action_dim == 14
     mouth = env.action_manager.get_term("mouth")
     act = torch.zeros(2, 14)
-    angles = []
+    angles, targets = [], []
     for _ in range(int(0.25 * 4.0 / env.step_dt)):        # to phase 0.25: mouth open
         env.step(act)
         angles.append(float(M.mouth_angle_obs(env)[0]))
-    assert max(angles) > 0.3
-    assert float(mouth._target[0, 0]) > 0.3
+        targets.append(float(mouth._target[0, 0]))
+    # max, not last: with zero actions the robot may fall and reset (mouth closed again) before phase 0.25
+    assert max(angles) > 0.3 and max(targets) > 0.3
     env.close()
