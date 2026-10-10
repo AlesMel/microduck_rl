@@ -74,6 +74,7 @@ GRASP_POINT_HOME_B = (0.061, 0.0, 0.101)
 # ── Variant knobs ──────────────────────────────────────────────────────────────
 BEAK_BISECTOR_WEIGHT = 3.0          # Gaussian (std 10°) on the bisector at 90° in the final descent and the bite
 APPROACH_LATERAL_WEIGHT = 4.0       # per m/s of sideways beak speed in the last 5 cm above the object
+HIP_LIMIT_WEIGHT = 2.0              # per (fraction of the 0.08 rad margin)^2, summed over the 4 hip yaw / roll joints
 BEAK_PITCH_PREF_WEIGHT = 0.0         # >0: Gaussian pull of the beak pitch toward BEAK_PITCH_TARGET in the grasp window
 BEAK_PITCH_TARGET = 60.0
 
@@ -197,6 +198,12 @@ def make_microduck_ground_grasp_env_cfg(
     cfg.rewards["approach_lateral"] = RewardTermCfg(
         func=microduck_mdp.approach_lateral_speed_penalty, weight=APPROACH_LATERAL_WEIGHT,
         params={"command_name": "twist", "height": 0.05, "phase_end": CLOSE_START},
+    )
+    # Hips off their stops (run 3 · 2000 parked both hip yaws and rolls on their limits: 0.93 N.m peaks).
+    cfg.rewards["hip_limit_proximity"] = RewardTermCfg(
+        func=microduck_mdp.joint_limit_proximity_penalty, weight=HIP_LIMIT_WEIGHT,
+        params={"margin": 0.08,
+                "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_yaw.*", r".*hip_roll.*"))},
     )
     # Anti-whip: checkpoint r1b-750 dropped into the crouch with a knee at 11.5 rad/s (XL330 top speed ~10-12);
     # 22 % of its pick ticks had a joint above 6 rad/s. Free below 5 rad/s.

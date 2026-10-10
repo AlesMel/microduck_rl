@@ -8109,3 +8109,20 @@ def approach_lateral_speed_penalty(
     above = gp[:, 2] - obj.data.root_link_pos_w[:, 2]
     gate = ((above < height) & (_gp_phase(env, command_name) < phase_end)).float()
     return -gate * torch.clamp(v, max=1.0)
+
+
+def joint_limit_proximity_penalty(
+    env: ManagerBasedRlEnv,
+    margin: float = 0.08,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=(r".*hip_yaw.*", r".*hip_roll.*")),
+) -> torch.Tensor:
+    """-sum over the selected joints of (max(0, margin - distance to the nearer hard limit) / margin)^2.
+    Self-negating (<= 0): POSITIVE weight. AGENTS.md's fix for joints parking on hard limits (the stock
+    dof_pos_limits only fires in the last ~7.5 % of range). Run 3 iteration 2000 crouched with both hip yaws and both
+    hip rolls on their stops, the left hip yaw at 0.93 N.m peak / 0.39 N.m RMS: a servo pushing into its own stop."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = asset_cfg.joint_ids
+    q = asset.data.joint_pos[:, ids]
+    lim = asset.data.joint_pos_limits[:, ids]          # (num_envs, n, 2)
+    dist = torch.minimum(q - lim[..., 0], lim[..., 1] - q)
+    return -(torch.clamp(margin - dist, min=0.0) / margin).pow(2).sum(-1)
