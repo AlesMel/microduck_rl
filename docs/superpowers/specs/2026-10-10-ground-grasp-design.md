@@ -173,3 +173,24 @@ height at the grasp, approach ratio, object push before closing, holding torques
   deployment = the nominal spot, vision can fill them later.
 - If the stand net drops the object at the hand-over: train the hold to φ = 1 and ask robotd to run the pick to 1.0
   for this policy (`GROUND_PICK_END_PHASE` is a constant today).
+
+## 8. Run log and lessons (2026-10-10)
+
+| run | start | change | result (CPU eval, robotd sequence) |
+|---|---|---|---|
+| R1 (cancelled) | today's move | — | fresh Adam at lr 1e-3 scrambled the copied actor (~1 rad in one update) |
+| R1b (cancelled at 800) | today's move, lr 1e-4 | — | it 250: lips at the floor, beak ~72°, near-vertical last 3 cm (0.8 cm sideways), grasps and lifts — then the block creeps out of the beak when the head comes level |
+| R2 | R1b model_750 | sticky friction (elliptic, impratio 10), squeeze 1.0 N·m/rad, reset noise 0.10 | it 1000: 26/54 placements (die 9/9, block 7/9, AA battery 7/9, Lego 2×2 3/9, Lego 2×4 lengthwise 0/9, big 0/9), beak ~75°, peak joint speed 7.9 rad/s |
+
+Lessons:
+- **Soft friction makes a wedge gripper leak.** MuJoCo's default pyramidal cone / impratio 1 lets a block pinched in the
+  forward-opening beak creep out at ~3 cm/s although μ 1.4 ≫ tan(half-wedge) 0.14. Elliptic + impratio 10 holds it.
+  The hold test must keep the robot a real support: resetting a free-falling robot's qpos every step removes the
+  normal force (gravity off + the block's weight as an external force is the clean rig, `hold_test.py`).
+- **Shallow bites fail.** Most misses close on the block's edge 0.5-1 cm inside the lips and squeeze it out. Deeper
+  bites need the lips at the floor and a flatter beak (Rémi's "closer to the ground and more parallel") → R3 adds the
+  60° pitch preference.
+- **Elongated objects must lie across the beak.** A blind move cannot adapt to orientation; the gap between the lips
+  is ~3 cm at 26°, so a 3.2 cm Lego lengthwise never fits. Placement advice for the robot: long side across.
+- **Tall objects need another move.** A 4.5 cm upright toy: 0/9. The floor-level move cannot straddle it.
+- robotd's 0.7 hand-over to the stand net keeps the block (the stand net holds the head level and the jaw squeezes).
