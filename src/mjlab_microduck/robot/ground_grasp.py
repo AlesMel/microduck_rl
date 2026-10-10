@@ -97,8 +97,25 @@ def get_ground_grasp_spec() -> mujoco.MjSpec:
         ex.name = f"trunk_base_{body}_hull_phantom"
         ex.bodyname1 = "trunk_base"
         ex.bodyname2 = body
+    # Hip-roll range: the export's +-0.384 rad is conservative. The physical robot was posed at 0.463 rad
+    # (flamingo, 2026-09-01) and its untorqued rest pose reads -0.566 rad on the right (duck-control REST_POSITION).
+    # A narrower sim stop let run 3 brace against it with targets 1.9 rad past it (robotd does not clamp there).
+    for jn in ("left_hip_roll", "right_hip_roll"):
+        spec.joint(jn).range = [-0.52, 0.52]
     add_mouth(spec)
     return spec
+
+
+SERVO_JOINTS = ("left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
+                "neck_pitch", "head_pitch", "head_yaw", "head_roll",
+                "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle")
+
+
+def ground_grasp_joint_limits() -> dict:
+    """{servo joint: (lo, hi)} on the ground-grasp model, in the 14-servo order."""
+    m = get_ground_grasp_spec().compile()
+    return {jn: tuple(float(v) for v in m.jnt_range[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, jn)])
+            for jn in SERVO_JOINTS}
 
 
 # The jaw's own servo, driven by the scripted MouthScheduleAction (action_dim 0), never by the policy. An XL330 at

@@ -125,3 +125,17 @@ def test_env_steps_on_cpu_with_61_obs_14_actions():
     # max, not last: with zero actions the robot may fall and reset (mouth closed again) before phase 0.25
     assert max(angles) > 0.3 and max(targets) > 0.3
     env.close()
+
+
+def test_targets_stay_inside_the_joint_ranges():
+    """Run 3 commanded hip targets 2 rad past their limits; robotd only clamps to ±π, so the env clamps the applied
+    target and taxes the raw overrun. Hip roll uses the real robot's range (±0.52)."""
+    from mjlab_microduck.robot.ground_grasp import ground_grasp_joint_limits
+    lim = ground_grasp_joint_limits()
+    assert lim["left_hip_roll"] == (-0.52, 0.52) and lim["right_hip_roll"] == (-0.52, 0.52)
+    cfg = make_microduck_ground_grasp_env_cfg()
+    clip = cfg.actions["joint_pos"].clip
+    assert set(clip) == set(lim)
+    for jn, (lo, hi) in lim.items():
+        assert clip[jn][0] < lo and clip[jn][1] > hi and clip[jn][1] - hi <= 0.15
+    assert cfg.rewards["action_overrun"].weight < 0      # >= 0 cost -> negative weight

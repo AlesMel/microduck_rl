@@ -8126,3 +8126,21 @@ def joint_limit_proximity_penalty(
     lim = asset.data.joint_pos_limits[:, ids]          # (num_envs, n, 2)
     dist = torch.minimum(q - lim[..., 0], lim[..., 1] - q)
     return -(torch.clamp(margin - dist, min=0.0) / margin).pow(2).sum(-1)
+
+
+def action_target_overrun_l1(
+    env: ManagerBasedRlEnv,
+    limits: list,
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """POSITIVE cost (-> negative weight): summed rad by which the RAW commanded target (default + action * scale)
+    exceeds each joint's range. The applied target is hard-clamped (BaseActionCfg.clip), so this teaches the network
+    itself to stay in range, which is what matters on the robot: robotd only clamps to the servo's full turn (±π).
+    (Same idea as the stomp env's action_target_overrun_l1 on emotions-stomp, summed instead of averaged.)"""
+    term = env.action_manager.get_term(action_name)
+    asset = env.scene[asset_cfg.name]
+    target = _servo_default_joint_pos(env, asset) + term.raw_action * float(getattr(term.cfg, "scale", 1.0))
+    lims = torch.tensor(limits, device=env.device, dtype=target.dtype)
+    over = torch.clamp(lims[:, 0].unsqueeze(0) - target, min=0.0) + torch.clamp(target - lims[:, 1].unsqueeze(0), min=0.0)
+    return torch.nan_to_num(over, nan=0.0).sum(dim=-1)
