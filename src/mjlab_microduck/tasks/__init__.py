@@ -278,3 +278,69 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+
+# ── Ground grasp (2026-10-10): the ground-pick slot with an opening beak + a real object ──
+from pathlib import Path as _Path
+
+from .microduck_ground_grasp_env_cfg import (
+    make_microduck_ground_grasp_env_cfg,
+    MicroduckGroundGraspRlCfg,
+)
+
+
+class GroundGraspFromPickRunner(MicroduckOnPolicyRunner):
+    """Warm start from TODAY's ground-pick move (Rémi's suggestion): the actor MLP and its observation normalizer are
+    copied from the deployed ONNX (same 61 -> 512 -> 256 -> 128 -> 14 ELU network; the exporter bakes
+    (obs - mean) / std into it). The critic stays fresh (its observations differ: object, mouth, contacts), the
+    exploration std starts at INIT_STD so the inherited move is not drowned in noise, and the normalizer count is huge
+    so the inherited statistics stay put. A real resume (--agent.resume) loads over this as usual."""
+
+    INIT_ONNX = _Path(__file__).parent / "init_policies" / "alpha_ground_pick.onnx"
+    INIT_STD = 0.3
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+        self._init_actor_from_onnx()
+
+    def _init_actor_from_onnx(self):
+        import onnx
+        import torch
+        from onnx import numpy_helper
+
+        init = {i.name: numpy_helper.to_array(i) for i in onnx.load(str(self.INIT_ONNX)).graph.initializer}
+        actor = self.alg.actor
+        sd = actor.state_dict()
+        std_key = next(k for k in init if k.startswith("onnx::Div"))
+        new = {
+            "obs_normalizer._mean": init["obs_normalizer._mean"],
+            "obs_normalizer._std": init[std_key],
+            "obs_normalizer._var": init[std_key] ** 2,
+        }
+        for k in ("mlp.0.weight", "mlp.0.bias", "mlp.2.weight", "mlp.2.bias", "mlp.4.weight", "mlp.4.bias",
+                  "mlp.6.weight", "mlp.6.bias"):
+            new[k] = init[k]
+        for k, v in new.items():
+            t = torch.as_tensor(v, dtype=sd[k].dtype, device=sd[k].device).reshape(sd[k].shape)
+            sd[k].copy_(t)
+        sd["obs_normalizer.count"].fill_(1e9)
+        sd["distribution.std_param"].fill_(self.INIT_STD)
+        actor.load_state_dict(sd)
+        print(f"[ground_grasp] actor initialised from {self.INIT_ONNX.name} (std {self.INIT_STD})")
+
+
+register_mjlab_task(
+    task_id="Mjlab-GroundGrasp-Flat-MicroDuck",
+    env_cfg=make_microduck_ground_grasp_env_cfg(),
+    play_env_cfg=make_microduck_ground_grasp_env_cfg(play=True),
+    rl_cfg=MicroduckGroundGraspRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-GroundGrasp-FromPick-MicroDuck",
+    env_cfg=make_microduck_ground_grasp_env_cfg(),
+    play_env_cfg=make_microduck_ground_grasp_env_cfg(play=True),
+    rl_cfg=MicroduckGroundGraspRlCfg,
+    runner_cls=GroundGraspFromPickRunner,
+)

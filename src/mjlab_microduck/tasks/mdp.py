@@ -7669,3 +7669,374 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Ground grasp (2026-10-10): the ground-pick slot with an opening beak and a   #
+# real object to grasp. Robot / object entities: robot/ground_grasp.py.        #
+# Design: docs/superpowers/specs/2026-10-10-ground-grasp-design.md             #
+# --------------------------------------------------------------------------- #
+from mjlab.managers.action_manager import ActionTerm as _ActionTerm, ActionTermCfg as _ActionTermCfg  # noqa: E402
+
+
+def _gg_cache(env: ManagerBasedRlEnv) -> dict:
+    return env.__dict__.setdefault("_ground_grasp_cache", {})
+
+
+def _gg_buffer(env: ManagerBasedRlEnv, name: str, dim: int) -> torch.Tensor:
+    c = _gg_cache(env)
+    if name not in c:
+        c[name] = torch.zeros(env.num_envs, dim, device=env.device)
+    return c[name]
+
+
+@_dataclass(kw_only=True)
+class MouthScheduleActionCfg(_ActionTermCfg):
+    """Scripted mouth: opens on the way down, closes at the floor — NOT a policy output (action_dim 0, so the
+    14-action contract is untouched). The jaw target follows the phase of `command_name`:
+    closed until open_start, ramps to open by open_end, holds, ramps closed over [close_start, close_end], closed
+    after (squeezing whatever is between the pads). Per-episode DR: open angle x U(open_scale_range), closing
+    shifted by U(-close_jitter, close_jitter)."""
+
+    joint_name: str = "passive_mouth"
+    command_name: str = "twist"
+    closed_rad: float = -0.0873
+    open_rad: float = 0.45
+    open_start: float = 0.02
+    open_end: float = 0.10
+    close_start: float = 0.30
+    close_end: float = 0.36
+    open_scale_range: tuple = (0.9, 1.05)
+    close_jitter: float = 0.01
+
+    def build(self, env: ManagerBasedRlEnv) -> "MouthScheduleAction":
+        return MouthScheduleAction(self, env)
+
+
+def mouth_schedule_fraction(phase: torch.Tensor, open_start: float, open_end: float,
+                            close_start: torch.Tensor | float, close_end: torch.Tensor | float) -> torch.Tensor:
+    """0 = closed, 1 = fully open, as a function of the phase (pure, testable)."""
+    o = torch.clamp((phase - open_start) / (open_end - open_start), 0.0, 1.0)
+    c = torch.clamp((phase - close_start) / (close_end - close_start), 0.0, 1.0)
+    return o * (1.0 - c)
+
+
+class MouthScheduleAction(_ActionTerm):
+    cfg: MouthScheduleActionCfg
+
+    def __init__(self, cfg: MouthScheduleActionCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        ids, _ = self._entity.find_joints(cfg.joint_name)
+        assert len(ids) == 1, f"mouth joint {cfg.joint_name!r} not found"
+        self._joint_ids = torch.tensor(ids, device=env.device, dtype=torch.long)
+        n = env.num_envs
+        self._raw = torch.zeros(n, 0, device=env.device)
+        self._open = torch.full((n,), cfg.open_rad, device=env.device)
+        self._shift = torch.zeros(n, device=env.device)
+        self._target = torch.full((n, 1), cfg.closed_rad, device=env.device)
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_action(self) -> torch.Tensor:
+        return self._raw
+
+    def target(self) -> torch.Tensor:
+        cfg = self.cfg
+        phase = _gp_phase(self._env, cfg.command_name)
+        frac = mouth_schedule_fraction(phase, cfg.open_start, cfg.open_end,
+                                       cfg.close_start + self._shift, cfg.close_end + self._shift)
+        return cfg.closed_rad + frac * (self._open - cfg.closed_rad)
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        self._target[:, 0] = self.target()
+
+    def apply_actions(self) -> None:
+        self._entity.set_joint_position_target(self._target, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        cfg = self.cfg
+        if env_ids is None:
+            env_ids = slice(None)
+        n = self._open[env_ids].shape[0]
+        lo, hi = cfg.open_scale_range
+        self._open[env_ids] = cfg.open_rad * (lo + (hi - lo) * torch.rand(n, device=self._open.device))
+        self._shift[env_ids] = (torch.rand(n, device=self._open.device) * 2 - 1) * cfg.close_jitter
+        self._target[env_ids, 0] = cfg.closed_rad
+
+
+def _gg_object_half(env: ManagerBasedRlEnv, asset_name: str) -> torch.Tensor:
+    """(num_envs, 3) half-extents of the object's (single, box) geom — per env once dr.geom_size expanded it."""
+    obj: Entity = env.scene[asset_name]
+    gid = int(obj.indexing.geom_ids[0])
+    gs = env.sim.model.geom_size
+    if gs.dim() == 3:
+        return gs[:, gid, :]
+    return gs[gid].unsqueeze(0).expand(env.num_envs, 3)
+
+
+def reset_grasp_object(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    nominal_xy: tuple = (0.11, 0.0),
+    noise_xy: tuple = (0.01, 0.01),
+    asset_name: str = "object",
+):
+    """Place the object on the floor at nominal_xy (robot yaw frame) + uniform noise, random yaw; store its spawn
+    position (object_spawn buffer). Reads the robot root from qpos (final after reset_base / set_ground_state):
+    register AFTER them and after the object size DR (events run in insertion order). The noise half-widths are
+    mutated by grasp_object_noise_curriculum."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device)
+    robot: Entity = env.scene["robot"]
+    obj: Entity = env.scene[asset_name]
+    root = env.sim.data.qpos[env_ids][:, robot.indexing.free_joint_q_adr]
+    qw, qx, qy, qz = root[:, 3], root[:, 4], root[:, 5], root[:, 6]
+    yaw = torch.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    cy, sy = torch.cos(yaw), torch.sin(yaw)
+    n = len(env_ids)
+    noise = torch.tensor(noise_xy, device=env.device, dtype=torch.float)
+    off = torch.tensor(nominal_xy, device=env.device, dtype=torch.float).repeat(n, 1)
+    off += (torch.rand(n, 2, device=env.device) * 2.0 - 1.0) * noise
+    half = _gg_object_half(env, asset_name)[env_ids]
+    pose = torch.zeros(n, 7, device=env.device)
+    pose[:, 0] = root[:, 0] + cy * off[:, 0] - sy * off[:, 1]
+    pose[:, 1] = root[:, 1] + sy * off[:, 0] + cy * off[:, 1]
+    pose[:, 2] = env.scene.terrain.env_origins[env_ids, 2] + half[:, 2] + 0.0005
+    oyaw = (torch.rand(n, device=env.device) * 2 - 1) * math.pi
+    pose[:, 3] = torch.cos(oyaw / 2)
+    pose[:, 6] = torch.sin(oyaw / 2)
+    obj.write_root_link_pose_to_sim(pose, env_ids)
+    obj.write_root_link_velocity_to_sim(torch.zeros(n, 6, device=env.device), env_ids)
+    spawn = _gg_buffer(env, "object_spawn", 3)
+    spawn[env_ids] = pose[:, :3]
+
+
+def grasp_object_noise_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    event_name: str = "reset_object",
+    stages: list | None = None,
+) -> dict:
+    """Step-based widening of the object placement noise: stages = [{"step": s, "noise_xy": (nx, ny)}, ...]."""
+    stages = stages or []
+    step = env.common_step_counter
+    cur = None
+    for st in stages:
+        if step >= st["step"]:
+            cur = st["noise_xy"]
+    if cur is not None:
+        term = env.event_manager.get_term_cfg(event_name)
+        term.params["noise_xy"] = tuple(cur)
+        return {"noise_x": float(cur[0]), "noise_y": float(cur[1])}
+    return {}
+
+
+def _gg_grasp_point(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """World position of the grasp point: midpoint of the two pad sites (pad_up on the head, pad_low on the jaw)."""
+    robot: Entity = env.scene["robot"]
+    c = _gg_cache(env)
+    if "pad_site_ids" not in c:
+        ids, _ = robot.find_sites(["pad_up", "pad_low"], preserve_order=True)
+        c["pad_site_ids"] = ids
+    ids = c["pad_site_ids"]
+    return 0.5 * (robot.data.site_pos_w[:, ids[0]] + robot.data.site_pos_w[:, ids[1]])
+
+
+def grasp_state(
+    env: ManagerBasedRlEnv,
+    asset_name: str = "object",
+    jaw_sensor: str = "object_jaw_contact",
+    upper_sensor: str = "object_upper_contact",
+    floor_sensor: str = "object_floor_contact",
+) -> dict:
+    """Per-step grasp booleans, cached on the step counter (several reward terms read them)."""
+    c = _gg_cache(env)
+    key = (env.common_step_counter, asset_name)
+    if c.get("grasp_state_key") == key:
+        return c["grasp_state"]
+    obj: Entity = env.scene[asset_name]
+    s = env.scene.sensors
+    jaw = s[jaw_sensor].data.found.reshape(env.num_envs, -1).sum(-1) > 0
+    upper = s[upper_sensor].data.found.reshape(env.num_envs, -1).sum(-1) > 0
+    floor = s[floor_sensor].data.found.reshape(env.num_envs, -1).sum(-1) > 0
+    spawn = _gg_buffer(env, "object_spawn", 3)
+    lift = obj.data.root_link_pos_w[:, 2] - spawn[:, 2]
+    pinched = jaw & upper
+    st = dict(jaw=jaw, upper=upper, floor=floor, pinched=pinched, lift=lift,
+              held=pinched & ~floor & (lift > 0.01))
+    c["grasp_state_key"] = key
+    c["grasp_state"] = st
+    return st
+
+
+def grasp_held(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    phase_start: float = 0.40,
+    asset_name: str = "object",
+) -> torch.Tensor:
+    """1 per step while the object is pinched between BOTH pads, off the floor and lifted >= 1 cm, for phase >=
+    phase_start (after the mouth has closed). The main task term."""
+    st = grasp_state(env, asset_name)
+    gate = (_gp_phase(env, command_name) >= phase_start).float()
+    return gate * st["held"].float()
+
+
+def grasp_lift(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    phase_start: float = 0.33,
+    max_lift: float = 0.04,
+    asset_name: str = "object",
+) -> torch.Tensor:
+    """Lift progress of a pinched object: clamp(lift / max_lift, 0, 1) while pinched and off the floor."""
+    st = grasp_state(env, asset_name)
+    gate = (_gp_phase(env, command_name) >= phase_start).float()
+    ok = (st["pinched"] & ~st["floor"]).float()
+    return gate * ok * torch.clamp(st["lift"] / max_lift, 0.0, 1.0)
+
+
+def grasp_approach_target(
+    env: ManagerBasedRlEnv,
+    phase: torch.Tensor,
+    asset_name: str = "object",
+    move_start: float = 0.05,
+    hover_at: float = 0.20,
+    down_at: float = 0.29,
+    hover_height: float = 0.06,
+    grasp_z_offset: float = 0.005,
+) -> torch.Tensor:
+    """Slewed target for the grasp point: from its standing position (grasp_start buffer) to a hover point
+    hover_height above the grasp spot by phase hover_at, then STRAIGHT DOWN onto it by down_at. The grasp spot is
+    the object centre + grasp_z_offset (the pad midpoint cannot reach the centre of a floor object: the lips would
+    have to go through the floor)."""
+    obj: Entity = env.scene[asset_name]
+    p_obj = obj.data.root_link_pos_w + torch.tensor([0.0, 0.0, grasp_z_offset], device=env.device)
+    start = _gg_buffer(env, "grasp_start", 3)
+    hover = p_obj + torch.tensor([0.0, 0.0, hover_height], device=env.device)
+    a = torch.clamp((phase - move_start) / (hover_at - move_start), 0.0, 1.0).unsqueeze(-1)
+    b = torch.clamp((phase - hover_at) / (down_at - hover_at), 0.0, 1.0).unsqueeze(-1)
+    first = start + a * (hover - start)
+    return torch.where(phase.unsqueeze(-1) < hover_at, first, hover + b * (p_obj - hover))
+
+
+def grasp_approach_track(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    std: float = 0.03,
+    phase_start: float = 0.05,
+    phase_end: float = 0.36,
+    move_start: float = 0.05,
+    hover_at: float = 0.20,
+    down_at: float = 0.29,
+    hover_height: float = 0.06,
+    asset_name: str = "object",
+) -> torch.Tensor:
+    """Gaussian tracking of the slewed approach target (above the object first, then a vertical descent).
+    Being ahead of the ramp pays nothing (AGENTS: no jackpots); a vertical final approach is the argmax."""
+    phase = _gp_phase(env, command_name)
+    tgt = grasp_approach_target(env, phase, asset_name, move_start, hover_at, down_at, hover_height)
+    d2 = (_gg_grasp_point(env) - tgt).pow(2).sum(-1)
+    gate = ((phase >= phase_start) & (phase < phase_end)).float()
+    return gate * torch.exp(-d2 / (std * std))
+
+
+def record_grasp_start(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    offset_b: tuple = (0.065, 0.0, 0.105),
+):
+    """Store the grasp point's standing position (root + yaw-rotated offset measured at HOME) as the start of
+    the approach target. Register after the robot reset events."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device)
+    robot: Entity = env.scene["robot"]
+    root = env.sim.data.qpos[env_ids][:, robot.indexing.free_joint_q_adr]
+    qw, qx, qy, qz = root[:, 3], root[:, 4], root[:, 5], root[:, 6]
+    yaw = torch.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    cy, sy = torch.cos(yaw), torch.sin(yaw)
+    ox, oy, oz = offset_b
+    start = _gg_buffer(env, "grasp_start", 3)
+    start[env_ids, 0] = root[:, 0] + cy * ox - sy * oy
+    start[env_ids, 1] = root[:, 1] + sy * ox + cy * oy
+    start[env_ids, 2] = root[:, 2] + oz
+
+
+def object_push_penalty(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    phase_end: float = 0.36,
+    max_dist: float = 0.04,
+    asset_name: str = "object",
+) -> torch.Tensor:
+    """-min(horizontal displacement of the object from its spawn point, max_dist) / max_dist, while the mouth is
+    open or closing (phase < phase_end). Self-negating (<= 0): use a POSITIVE weight. This prices exactly what a
+    frontal or sideways approach does: push the object away."""
+    obj: Entity = env.scene[asset_name]
+    spawn = _gg_buffer(env, "object_spawn", 3)
+    d = torch.norm(obj.data.root_link_pos_w[:, :2] - spawn[:, :2], dim=-1)
+    gate = (_gp_phase(env, command_name) < phase_end).float()
+    return -gate * torch.clamp(d, max=max_dist) / max_dist
+
+
+def beak_pitch(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Beak pitch in degrees (0 = level as when standing, 90 = pointing straight down), full range."""
+    robot: Entity = env.scene["robot"]
+    c = _gg_cache(env)
+    if "head_body_id" not in c:
+        ids, _ = robot.find_bodies(["jaw_soft"])
+        c["head_body_id"] = ids[0]
+    q = robot.data.body_link_quat_w[:, c["head_body_id"]]
+    R = matrix_from_quat(q)            # head-local x = up, z = back
+    fwd_z = -R[:, 2, 2]
+    up_z = R[:, 2, 0]
+    return torch.rad2deg(torch.atan2(-fwd_z, up_z))
+
+
+def beak_pitch_pref(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    target_deg: float = 60.0,
+    std_deg: float = 15.0,
+    phase_start: float = 0.22,
+    phase_end: float = 0.36,
+) -> torch.Tensor:
+    """Optional shaping: Gaussian on beak pitch around target_deg during the grasp window."""
+    phase = _gp_phase(env, command_name)
+    gate = ((phase >= phase_start) & (phase < phase_end)).float()
+    return gate * torch.exp(-((beak_pitch(env) - target_deg) / std_deg) ** 2)
+
+
+def object_pos_rel_grasp_point(env: ManagerBasedRlEnv, asset_name: str = "object") -> torch.Tensor:
+    """CRITIC-ONLY: object position minus grasp point, in the robot base frame."""
+    robot: Entity = env.scene["robot"]
+    obj: Entity = env.scene[asset_name]
+    rel = obj.data.root_link_pos_w - _gg_grasp_point(env)
+    rot = matrix_from_quat(robot.data.root_link_quat_w)
+    return torch.bmm(rot.transpose(1, 2), rel.unsqueeze(-1)).squeeze(-1)
+
+
+def object_size_obs(env: ManagerBasedRlEnv, asset_name: str = "object") -> torch.Tensor:
+    """CRITIC-ONLY: object half-extents."""
+    return _gg_object_half(env, asset_name)
+
+
+def mouth_angle_obs(env: ManagerBasedRlEnv, joint_name: str = "passive_mouth") -> torch.Tensor:
+    """CRITIC-ONLY: jaw angle (rad)."""
+    robot: Entity = env.scene["robot"]
+    c = _gg_cache(env)
+    if "mouth_joint_id" not in c:
+        ids, _ = robot.find_joints(joint_name)
+        c["mouth_joint_id"] = ids[0]
+    return robot.data.joint_pos[:, c["mouth_joint_id"]].unsqueeze(-1)
+
+
+def grasp_contacts_obs(env: ManagerBasedRlEnv, asset_name: str = "object") -> torch.Tensor:
+    """CRITIC-ONLY: [object touches jaw pad, upper pad, floor]."""
+    st = grasp_state(env, asset_name)
+    return torch.stack([st["jaw"], st["upper"], st["floor"]], dim=-1).float()
