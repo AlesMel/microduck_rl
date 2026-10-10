@@ -8046,3 +8046,16 @@ def grasp_contacts_obs(env: ManagerBasedRlEnv, asset_name: str = "object") -> to
     """CRITIC-ONLY: [object touches jaw pad, upper pad, floor]."""
     st = grasp_state(env, asset_name)
     return torch.stack([st["jaw"], st["upper"], st["floor"]], dim=-1).float()
+
+
+def joint_overspeed_penalty(
+    env: ManagerBasedRlEnv,
+    threshold: float = 5.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """-sum over the 14 servos of max(0, |qvel| - threshold)^2 (rad/s). Self-negating (<= 0): POSITIVE weight.
+    Free below the threshold, so slow big motions cost nothing; an XL330 tops out near 10-12 rad/s at 7.4 V and a
+    whip at that speed is what overheats and strips gears (Rémi's veto on thrashing)."""
+    asset = env.scene[asset_cfg.name]
+    v = _servo_joint_vel(env, asset)
+    return -torch.clamp(v.abs() - threshold, min=0.0).pow(2).sum(-1)

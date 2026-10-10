@@ -174,6 +174,11 @@ def make_microduck_ground_grasp_env_cfg(
         func=microduck_mdp.body_impact_cost, weight=-0.5,
         params={"sensor_name": "jaw_floor_contact", "threshold": 3.0},
     )
+    # Anti-whip: checkpoint r1b-750 dropped into the crouch with a knee at 11.5 rad/s (XL330 top speed ~10-12);
+    # 22 % of its pick ticks had a joint above 6 rad/s. Free below 5 rad/s.
+    cfg.rewards["joint_overspeed"] = RewardTermCfg(
+        func=microduck_mdp.joint_overspeed_penalty, weight=0.15, params={"threshold": 5.0},
+    )
     if beak_pitch_pref_weight > 0:
         cfg.rewards["beak_pitch_pref"] = RewardTermCfg(
             func=microduck_mdp.beak_pitch_pref, weight=beak_pitch_pref_weight,

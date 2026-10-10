@@ -87,6 +87,7 @@ def test_reward_signs_and_contract_terms():
         assert r[name].weight > 0, name
     # self-negating penalty -> POSITIVE weight (AGENTS.md sign convention)
     assert r["object_pushed"].func is M.object_push_penalty and r["object_pushed"].weight > 0
+    assert r["joint_overspeed"].func is M.joint_overspeed_penalty and r["joint_overspeed"].weight > 0
     # >= 0 costs -> negative weights
     for name in ("head_floor_impact", "jaw_floor_impact", "action_rate_l2", "self_collisions"):
         assert r[name].weight < 0, name
@@ -101,6 +102,8 @@ def test_reward_signs_and_contract_terms():
                      "head_command", "body_command"]
     assert "object_pos" in cfg.observations["critic"].terms
     assert cfg.commands["twist"].randomize_phase is False
+    # sticky friction (a pinched block creeps out of the wedge with pyramidal / impratio 1)
+    assert cfg.sim.mujoco.cone == "elliptic" and cfg.sim.mujoco.impratio >= 10
 
 
 def test_env_steps_on_cpu_with_61_obs_14_actions():
