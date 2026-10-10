@@ -49,7 +49,36 @@ feet, holding torques (gravity, both feet sharing the weight), self-collisions. 
 
 ### 3.1 Results
 
-(see `notes/ground-grasp/poses/study_theta045.txt`)
+`notes/ground-grasp/poses/study_theta045.txt` (mouth open 0.45 rad; heights of the lowest beak point, centre-of-mass
+margin inside the feet, max holding torque):
+
+| target pitch | reached | jaw tip | upper lip | lowest head pt | CoM margin | max torque |
+|---|---|---|---|---|---|---|
+| 0° | 29.9° | 1.27 cm | 3.33 cm | 1.27 cm | −0.26 cm (tips over) | 0.25 N·m |
+| 15° | 39.3° | 0.93 | 2.49 | 0.93 | 0.24 | 0.24 |
+| 30° | 46.9° | 0.80 | 1.94 | 0.80 | 0.75 | 0.22 |
+| 45° | 51.1° | 0.69 | 1.57 | 0.69 | 0.93 | 0.21 |
+| 60° | 60.2° | 0.52 | 0.86 | 0.52 | 0.93 | 0.21 |
+| 75° | 76.9° | 1.20 | 0.52 | 0.34 (dome) | 1.26 | 0.20 |
+| 86° | 86.3° | 1.94 | 0.70 | 0.30 (dome) | 1.48 | 0.19 |
+
+- A level beak at the floor is impossible: below ~45° the centre of mass leaves the feet and the neck / head-pitch
+  joints sit on their stops (deep squat, hip pitch and ankle at ±1.5 rad).
+- ~60° is the sweet spot: both lips within 1 cm of the floor, the open wedge facing down and slightly forward
+  (a vertical approach straddles the object). Lips land 8–11.5 cm in front of the feet.
+- At 75–86° (today's family) the forehead dome is the lowest point; statically the lips could reach 0.5–0.7 cm, today's
+  move stops at 2.8 cm.
+- Holding torques ≤ 0.25 N·m everywhere (XL330 stall ≈ 0.6 N·m): the heavy head is not a static blocker.
+
+### 3.2 Corrections found while building
+
+- gg_eval first placed the object at spawn time; the stand net steps ~10 cm after the spawn drop and kicked it. The
+  eval now pre-rolls 2.5 s and places the object at the pick start (as at a training reset). Corrected baseline: the
+  head comes down right over the object but the forehead is lowest, lips 2.8 cm up, object untouched, 0 % grasp.
+- The stand net's settled stance differs from HOME by up to 0.14 rad (neck −0.14, head pitch +0.08); training resets
+  use ±0.05 rad → widen in the next version.
+- Warm start: a FRESH Adam at lr 1e-3 moved the inherited actions by ~1 rad in one update (every weight moves ~lr).
+  FromPick now starts at lr 1e-4 (0.02 rad after one update) and lets the adaptive schedule raise it.
 
 ## 4. Environment
 
