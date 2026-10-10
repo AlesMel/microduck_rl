@@ -7909,13 +7909,17 @@ def grasp_approach_target(
     down_at: float = 0.29,
     hover_height: float = 0.06,
     grasp_z_offset: float = 0.005,
+    top_offset: float = 0.0,
 ) -> torch.Tensor:
     """Slewed target for the grasp point: from its standing position (grasp_start buffer) to a hover point
     hover_height above the grasp spot by phase hover_at, then STRAIGHT DOWN onto it by down_at. The grasp spot is
     the object centre + grasp_z_offset (the pad midpoint cannot reach the centre of a floor object: the lips would
-    have to go through the floor)."""
+    have to go through the floor), or, with top_offset > 0 (tall objects), top_offset below the object's top."""
     obj: Entity = env.scene[asset_name]
     p_obj = obj.data.root_link_pos_w + torch.tensor([0.0, 0.0, grasp_z_offset], device=env.device)
+    if top_offset > 0:
+        top = obj.data.root_link_pos_w[:, 2] + _gg_object_half(env, asset_name)[:, 2] - top_offset
+        p_obj = torch.cat([obj.data.root_link_pos_w[:, :2], top.unsqueeze(-1)], dim=-1)
     start = _gg_buffer(env, "grasp_start", 3)
     hover = p_obj + torch.tensor([0.0, 0.0, hover_height], device=env.device)
     a = torch.clamp((phase - move_start) / (hover_at - move_start), 0.0, 1.0).unsqueeze(-1)
@@ -7936,13 +7940,15 @@ def grasp_approach_track(
     hover_height: float = 0.06,
     asset_name: str = "object",
     std_wide: float = 0.0,
+    top_offset: float = 0.0,
 ) -> torch.Tensor:
     """Gaussian tracking of the slewed approach target (above the object first, then a vertical descent).
     Being ahead of the ramp pays nothing (AGENTS: no jackpots); a vertical final approach is the argmax.
     std_wide > 0: half the pay comes from a second, wide Gaussian so a policy that starts far away (today's move
     lands ~7 cm off the target) still sees a gradient."""
     phase = _gp_phase(env, command_name)
-    tgt = grasp_approach_target(env, phase, asset_name, move_start, hover_at, down_at, hover_height)
+    tgt = grasp_approach_target(env, phase, asset_name, move_start, hover_at, down_at, hover_height,
+                                top_offset=top_offset)
     d2 = (_gg_grasp_point(env) - tgt).pow(2).sum(-1)
     gate = ((phase >= phase_start) & (phase < phase_end)).float()
     r = torch.exp(-d2 / (std * std))

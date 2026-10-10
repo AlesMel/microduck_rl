@@ -362,3 +362,12 @@ register_mjlab_task(
     rl_cfg=MicroduckGroundGraspRlCfg,
     runner_cls=GroundGraspFromPickRunner,
 )
+
+# Tall objects standing up (small toys, 3-5 cm): the beak takes the top slice. Fine-tuned from a floor-grasp checkpoint.
+register_mjlab_task(
+    task_id="Mjlab-GroundGrasp-Tall-MicroDuck",
+    env_cfg=make_microduck_ground_grasp_env_cfg(tall=True),
+    play_env_cfg=make_microduck_ground_grasp_env_cfg(play=True, tall=True),
+    rl_cfg=MicroduckGroundGraspRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)

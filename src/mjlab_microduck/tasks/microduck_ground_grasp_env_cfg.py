@@ -78,10 +78,17 @@ BEAK_PITCH_PREF_WEIGHT = 0.0         # >0: Gaussian pull of the beak pitch towar
 BEAK_PITCH_TARGET = 60.0
 
 
+# Tall-object variant (Rémi: "several movements depending on the height of the object"): small toys standing up,
+# 1.6-2.4 cm wide and 3.2-5.1 cm tall; the beak takes the top 1 cm-deep slice instead of reaching the floor.
+TALL_HALF_SCALE = {0: (0.8, 1.2), 1: (0.8, 1.2), 2: (2.0, 3.2)}
+TALL_TOP_OFFSET = 0.012
+
+
 def make_microduck_ground_grasp_env_cfg(
     play: bool = False,
     beak_pitch_pref_weight: float = BEAK_PITCH_PREF_WEIGHT,
     beak_pitch_target: float = BEAK_PITCH_TARGET,
+    tall: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     cfg = make_microduck_ground_pick_env_cfg(play=play, rough=False)
 
@@ -220,8 +227,10 @@ def make_microduck_ground_grasp_env_cfg(
     obj = SceneEntityCfg("object", geom_names=("object_geom",))
     cfg.events["object_size"] = EventTermCfg(
         func=dr.geom_size, mode="reset",
-        params={"asset_cfg": obj, "operation": "scale", "ranges": OBJECT_HALF_SCALE},
+        params={"asset_cfg": obj, "operation": "scale", "ranges": TALL_HALF_SCALE if tall else OBJECT_HALF_SCALE},
     )
+    if tall:
+        cfg.rewards["approach_track"].params["top_offset"] = TALL_TOP_OFFSET
     cfg.events["object_mass"] = EventTermCfg(          # mass and inertia scaled together (e^(2 alpha))
         func=dr.pseudo_inertia, mode="reset",
         params={"asset_cfg": SceneEntityCfg("object", body_names=("object",)),
