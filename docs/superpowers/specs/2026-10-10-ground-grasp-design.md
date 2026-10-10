@@ -206,3 +206,7 @@ Lessons:
   carries 0.39 N·m RMS (peaks at its limit). Final iteration only 32/48: checkpoints fluctuate, score with 8 tries.
 - Flat objects (2×2 Lego, 1.1 cm): the from-the-sky wedge only reaches them with the lip tips → a flatter, scooping
   move. Tall objects (3-5 cm): R4 (`Mjlab-GroundGrasp-Tall-MicroDuck`, top-slice target) from R3 final.
+- R4 (tall objects, from R3 final): 38-50 % on tall objects across checkpoints, whips at ~11 rad/s. The FLOOR
+  candidate (R3 · 2000) scores 22/24 on the same tall objects (4.5 cm toy 7/8, 4 cm block 7/8, standing AA 8/8):
+  one move covers tall toys; the tall track is closed. Candidate over 9 objects: 60/72.
+- R6 (hip limit-proximity penalty, from R3 · 2000) running; R5 (flat objects, no bisector preference) queued.
