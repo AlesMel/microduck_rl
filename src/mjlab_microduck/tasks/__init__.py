@@ -371,3 +371,12 @@ register_mjlab_task(
     rl_cfg=MicroduckGroundGraspRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
+
+# Flat objects (2x2-Lego-like, 0.8-1.2 cm tall): no bisector preference, RL picks the beak angle.
+register_mjlab_task(
+    task_id="Mjlab-GroundGrasp-Flat-Objects-MicroDuck",
+    env_cfg=make_microduck_ground_grasp_env_cfg(flat=True),
+    play_env_cfg=make_microduck_ground_grasp_env_cfg(play=True, flat=True),
+    rl_cfg=MicroduckGroundGraspRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
