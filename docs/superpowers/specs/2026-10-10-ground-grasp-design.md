@@ -194,3 +194,15 @@ Lessons:
   is ~3 cm at 26°, so a 3.2 cm Lego lengthwise never fits. Placement advice for the robot: long side across.
 - **Tall objects need another move.** A 4.5 cm upright toy: 0/9. The floor-level move cannot straddle it.
 - robotd's 0.7 hand-over to the stand net keeps the block (the stand net holds the head level and the jaw squeezes).
+
+### Update (17:15): Rémi's geometry, run 3, candidate
+
+- Rémi's target (voice, 2026-10-10): the **bisector of the open beak** perpendicular to the ground ("from the sky"), i.e.
+  head pitch + jaw opening / 2 = 90° (≈ 77° head pitch at 26°). My first "level beak" (head level as when standing)
+  was a misreading. Scoring: reliability at one small spot first, area as a bonus; several moves are fine.
+- R3 (resume R2 1749, wandb of0f1k47): bisector preference, sideways-speed penalty in the last 5 cm, head impacts ×3,
+  placement noise 1 cm, overspeed penalty. Iteration 2000 = **38/48 at the spot** (die, 2 cm block, 2.6 cm block 8/8,
+  Lego 2×4 across 7/8, lying AA 5/8, Lego 2×2 2/8), bisector 92°, peak joint speed 8.2 rad/s, but the left hip yaw
+  carries 0.39 N·m RMS (peaks at its limit). Final iteration only 32/48: checkpoints fluctuate, score with 8 tries.
+- Flat objects (2×2 Lego, 1.1 cm): the from-the-sky wedge only reaches them with the lip tips → a flatter, scooping
+  move. Tall objects (3-5 cm): R4 (`Mjlab-GroundGrasp-Tall-MicroDuck`, top-slice target) from R3 final.
