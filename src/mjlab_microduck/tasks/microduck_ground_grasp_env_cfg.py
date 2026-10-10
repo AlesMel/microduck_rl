@@ -54,7 +54,7 @@ RETURN_START, RETURN_END = 0.40, 0.62   # stand-up gates (robotd hands over at 0
 
 # ── Object placement (robot yaw frame) ────────────────────────────────────────
 # Static pose study (notes/ground-grasp/poses): at a 60° beak pitch the lips land 9-13 cm in front of the feet.
-OBJECT_NOMINAL_XY = (0.11, 0.0)
+OBJECT_NOMINAL_XY = (0.10, 0.0)      # from the standing root; the study's 60° lips span 8-11.5 cm from the feet
 OBJECT_NOISE_STAGES = [
     {"step": 0, "noise_xy": (0.01, 0.01)},
     {"step": 600 * 24, "noise_xy": (0.015, 0.015)},
@@ -138,16 +138,17 @@ def make_microduck_ground_grasp_env_cfg(
         cfg.rewards.pop(name, None)
 
     cfg.rewards["grasp_held"] = RewardTermCfg(
-        func=microduck_mdp.grasp_held, weight=8.0,
+        func=microduck_mdp.grasp_held, weight=15.0,
         params={"command_name": "twist", "phase_start": HELD_FROM},
     )
     cfg.rewards["grasp_lift"] = RewardTermCfg(
-        func=microduck_mdp.grasp_lift, weight=4.0,
+        func=microduck_mdp.grasp_lift, weight=6.0,
         params={"command_name": "twist", "phase_start": CLOSE_START + 0.03, "max_lift": 0.04},
     )
     cfg.rewards["approach_track"] = RewardTermCfg(
-        func=microduck_mdp.grasp_approach_track, weight=4.0,
-        params={"command_name": "twist", "std": 0.03, "phase_start": APPROACH_START, "phase_end": CLOSE_END,
+        func=microduck_mdp.grasp_approach_track, weight=10.0,
+        params={"command_name": "twist", "std": 0.03, "std_wide": 0.08, "phase_start": APPROACH_START,
+                "phase_end": CLOSE_END,
                 "move_start": APPROACH_START, "hover_at": HOVER_AT, "down_at": DOWN_AT,
                 "hover_height": HOVER_HEIGHT},
     )

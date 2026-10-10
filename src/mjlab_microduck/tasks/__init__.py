@@ -297,7 +297,7 @@ class GroundGraspFromPickRunner(MicroduckOnPolicyRunner):
     so the inherited statistics stay put. A real resume (--agent.resume) loads over this as usual."""
 
     INIT_ONNX = _Path(__file__).parent / "init_policies" / "alpha_ground_pick.onnx"
-    INIT_STD = 0.3
+    INIT_STD = 0.25
 
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
         super().__init__(env, train_cfg, log_dir, device, **kwargs)

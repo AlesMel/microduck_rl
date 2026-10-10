@@ -7935,14 +7935,20 @@ def grasp_approach_track(
     down_at: float = 0.29,
     hover_height: float = 0.06,
     asset_name: str = "object",
+    std_wide: float = 0.0,
 ) -> torch.Tensor:
     """Gaussian tracking of the slewed approach target (above the object first, then a vertical descent).
-    Being ahead of the ramp pays nothing (AGENTS: no jackpots); a vertical final approach is the argmax."""
+    Being ahead of the ramp pays nothing (AGENTS: no jackpots); a vertical final approach is the argmax.
+    std_wide > 0: half the pay comes from a second, wide Gaussian so a policy that starts far away (today's move
+    lands ~7 cm off the target) still sees a gradient."""
     phase = _gp_phase(env, command_name)
     tgt = grasp_approach_target(env, phase, asset_name, move_start, hover_at, down_at, hover_height)
     d2 = (_gg_grasp_point(env) - tgt).pow(2).sum(-1)
     gate = ((phase >= phase_start) & (phase < phase_end)).float()
-    return gate * torch.exp(-d2 / (std * std))
+    r = torch.exp(-d2 / (std * std))
+    if std_wide > 0:
+        r = 0.5 * r + 0.5 * torch.exp(-d2 / (std_wide * std_wide))
+    return gate * r
 
 
 def record_grasp_start(
