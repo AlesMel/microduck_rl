@@ -64,6 +64,10 @@ OBJECT_HALF_SCALE = (0.7, 1.3)       # x the nominal 1.0 x 1.0 x 0.8 cm half-ext
 OBJECT_MASS_SCALE = (0.4, 2.0)       # x 12 g
 OBJECT_FRICTION = (1.1, 1.6)
 
+# Reset joint noise: robotd starts the pick from the STAND net's settled stance, measured up to 0.14 rad off HOME
+# (neck -0.14, head pitch +0.08, knees +-0.05; CPU eval 2026-10-10).
+RESET_JOINT_NOISE = 0.10
+
 # Grasp point (pad midpoint) at HOME relative to the robot root, base frame (measured on the model).
 GRASP_POINT_HOME_B = (0.061, 0.0, 0.101)
 
@@ -115,6 +119,12 @@ def make_microduck_ground_grasp_env_cfg(
         obj_contact("object_upper_contact", "upper_beak_collision"),
     )
     cfg.sim.nconmax = 60
+    # Sticky friction. With the default pyramidal cone / impratio 1, a block pinched in the beak's forward-opening wedge
+    # CREEPS out at ~3 cm/s although mu 1.4 >> tan(half-wedge) 0.14 (soft-friction artefact; hold test,
+    # notes/ground-grasp/tools/hold_test.py). Elliptic + impratio 10 holds it within ~4 mm (Rémi: assume enough
+    # friction). Applies to every contact of this env, feet included.
+    cfg.sim.mujoco.cone = "elliptic"
+    cfg.sim.mujoco.impratio = 10.0
     cfg.episode_length_s = GG_PERIOD
 
     # ── Actions: the 14 servos (the mouth actuator is passive_* -> excluded) + the scripted mouth ──
@@ -188,7 +198,7 @@ def make_microduck_ground_grasp_env_cfg(
 
     # ── Events ────────────────────────────────────────────────────────────────
     cfg.events.pop("sample_mouth_payload", None)
-    cfg.events["reset_robot_joints"].params["position_range"] = (-0.05, 0.05)   # handed over from the stand net
+    cfg.events["reset_robot_joints"].params["position_range"] = (-RESET_JOINT_NOISE, RESET_JOINT_NOISE)
     obj = SceneEntityCfg("object", geom_names=("object_geom",))
     cfg.events["object_size"] = EventTermCfg(
         func=dr.geom_size, mode="reset",

@@ -352,3 +352,13 @@ register_mjlab_task(
     rl_cfg=MicroduckGroundGraspRlCfg,
     runner_cls=GroundGraspFromPickRunner,
 )
+
+# Variant: same, plus a Gaussian pull of the beak pitch toward 60° in the grasp window (the static pose study's sweet
+# spot: both lips < 1 cm from the floor) — for when the task alone keeps today's straight-down beak.
+register_mjlab_task(
+    task_id="Mjlab-GroundGrasp-FromPickPitch60-MicroDuck",
+    env_cfg=make_microduck_ground_grasp_env_cfg(beak_pitch_pref_weight=3.0, beak_pitch_target=60.0),
+    play_env_cfg=make_microduck_ground_grasp_env_cfg(play=True, beak_pitch_pref_weight=3.0, beak_pitch_target=60.0),
+    rl_cfg=MicroduckGroundGraspRlCfg,
+    runner_cls=GroundGraspFromPickRunner,
+)

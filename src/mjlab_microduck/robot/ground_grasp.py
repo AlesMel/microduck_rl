@@ -101,11 +101,12 @@ def get_ground_grasp_spec() -> mujoco.MjSpec:
     return spec
 
 
-# The jaw's own servo: an XL330 at firmware kP 200 is ~0.55 N.m/rad (BAM), effort capped at 0.5 N.m. Driven by the
-# scripted MouthScheduleAction (action_dim 0), never by the policy.
+# The jaw's own servo, driven by the scripted MouthScheduleAction (action_dim 0), never by the policy. An XL330 at
+# firmware kP 200 is ~0.55 N.m/rad (BAM); Rémi's brief says to assume enough beak torque, so it squeezes at 1.0 N.m/rad
+# (0.3 N.m on a 1.6 cm block), effort capped at 0.5 N.m (XL330 class).
 MOUTH_ACTUATOR = BuiltinPositionActuatorCfg(
     target_names_expr=(MOUTH_JOINT,),
-    stiffness=0.55,
+    stiffness=1.0,
     damping=0.01,
     effort_limit=0.5,
 )
