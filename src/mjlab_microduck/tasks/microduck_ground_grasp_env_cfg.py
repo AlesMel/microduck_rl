@@ -79,7 +79,7 @@ HIP_LIMIT_WEIGHT = 0.0              # off: run 6 (weight 2) lost success and mov
 # Commanded targets stay within TARGET_CLIP_MARGIN of each joint's range (hard clamp) and pay ACTION_OVERRUN_WEIGHT
 # per rad past it (on the RAW output): run 3 commanded hip targets up to 2 rad past their limits.
 TARGET_CLIP_MARGIN = 0.10
-ACTION_OVERRUN_WEIGHT = -3.0
+ACTION_OVERRUN_WEIGHT = -10.0      # run 7 (-3) still sent the neck 0.66 rad past its stop at the bite
 BEAK_PITCH_PREF_WEIGHT = 0.0         # >0: Gaussian pull of the beak pitch toward BEAK_PITCH_TARGET in the grasp window
 BEAK_PITCH_TARGET = 60.0
 
