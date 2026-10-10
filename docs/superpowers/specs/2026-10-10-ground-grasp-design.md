@@ -210,3 +210,18 @@ Lessons:
   candidate (R3 · 2000) scores 22/24 on the same tall objects (4.5 cm toy 7/8, 4 cm block 7/8, standing AA 8/8):
   one move covers tall toys; the tall track is closed. Candidate over 9 objects: 60/72.
 - R6 (hip limit-proximity penalty, from R3 · 2000) running; R5 (flat objects, no bisector preference) queued.
+
+### Update (19:50): the joint-overrun lesson and the safe candidate
+
+- After offering a robot test with R3 · 2000, I checked the COMMANDED targets: hips up to 2.06 rad past their limits
+  during half the pick, bracing on the sim's hard stops with saturated servos. robotd only clamps to ±π
+  (duck-control/src/safety.rs), and the real hip roll goes past the export's ±0.384 (rest pose −0.566). Withdrawn.
+  Today's shipped move stays within 0.06 rad. `notes/ground-grasp/tools/overrun_check.py` is now a pre-flight in
+  duck-grasp-test (refuses > 0.3 rad).
+- R6 (qpos-side hip-limit proximity penalty) made it worse (35-54 %, strain moved to neck / hip pitch).
+- R7 (from R3 · 2000): applied targets clamped to the joint range ±0.1 rad + tax on the RAW overrun (-3/rad), hip roll
+  ±0.52. Iteration 2750: 40/48, hip strain gone (0.19 N·m RMS busiest servo), flat 2×2 Lego 8/8, but the neck still
+  0.66 rad past its stop at the bite.
+- R8 (from R7 · 2750, tax -10/rad, checkpoints every 100): iteration 3000 = **41/48 at the spot + 22/24 tall**, worst
+  overrun 0.17-0.22 rad, bisector 90°, peak joint speed 5.9 rad/s, robust (6.5 V 90 %, 8.2 V 100 %, latency 85 %, no
+  low-pass 80 %, no falls). Candidate: `notes/ground-grasp/policies/candidate-r8-3000.onnx`. Weak spot: lying AA 2/8.
