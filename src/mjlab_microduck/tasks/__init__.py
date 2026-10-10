@@ -298,6 +298,10 @@ class GroundGraspFromPickRunner(MicroduckOnPolicyRunner):
 
     INIT_ONNX = _Path(__file__).parent / "init_policies" / "alpha_ground_pick.onnx"
     INIT_STD = 0.25
+    # A FRESH Adam moves every weight by ~lr on its first steps (m/sqrt(v) ~ sign(g)): at the cfg's 1e-3 that shifted
+    # the inherited actions by ~1 rad in ONE update (measured on the smoke run). Start low; the adaptive KL schedule
+    # raises it (x1.5 per update while KL < desired/2) once the moments are warm.
+    INIT_LR = 1e-4
 
     def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
         super().__init__(env, train_cfg, log_dir, device, **kwargs)
@@ -312,10 +316,11 @@ class GroundGraspFromPickRunner(MicroduckOnPolicyRunner):
         actor = self.alg.actor
         sd = actor.state_dict()
         std_key = next(k for k in init if k.startswith("onnx::Div"))
+        std = init[std_key] - actor.obs_normalizer.eps      # the exporter bakes (obs - mean) / (std + eps)
         new = {
             "obs_normalizer._mean": init["obs_normalizer._mean"],
-            "obs_normalizer._std": init[std_key],
-            "obs_normalizer._var": init[std_key] ** 2,
+            "obs_normalizer._std": std,
+            "obs_normalizer._var": std ** 2,
         }
         for k in ("mlp.0.weight", "mlp.0.bias", "mlp.2.weight", "mlp.2.bias", "mlp.4.weight", "mlp.4.bias",
                   "mlp.6.weight", "mlp.6.bias"):
@@ -326,7 +331,10 @@ class GroundGraspFromPickRunner(MicroduckOnPolicyRunner):
         sd["obs_normalizer.count"].fill_(1e9)
         sd["distribution.std_param"].fill_(self.INIT_STD)
         actor.load_state_dict(sd)
-        print(f"[ground_grasp] actor initialised from {self.INIT_ONNX.name} (std {self.INIT_STD})")
+        self.alg.learning_rate = self.INIT_LR
+        for g in self.alg.optimizer.param_groups:
+            g["lr"] = self.INIT_LR
+        print(f"[ground_grasp] actor initialised from {self.INIT_ONNX.name} (std {self.INIT_STD}, lr {self.INIT_LR})")
 
 
 register_mjlab_task(
