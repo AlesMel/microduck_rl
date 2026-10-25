@@ -41,6 +41,10 @@ class Field:
 
 FIELD = Field()
 
+# Each duck kicks off this far into its own half, facing the other goal — in training and in
+# duck-sim alike.
+KICKOFF_X = 0.6
+
 FIELD_XML = Path(__file__).resolve().parents[1] / "robot" / "microduck" / "soccer_field.xml"
 
 _WALL_RGBA = (0.85, 0.85, 0.9, 1.0)

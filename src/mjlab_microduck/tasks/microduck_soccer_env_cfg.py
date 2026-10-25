@@ -44,7 +44,7 @@ from mjlab_microduck.robot.microduck_constants import (
 )
 from mjlab_microduck.soccer import mdp as soccer_mdp
 from mjlab_microduck.soccer.actions import WalkerCommandActionCfg
-from mjlab_microduck.soccer.field import add_field
+from mjlab_microduck.soccer.field import KICKOFF_X, add_field
 from mjlab_microduck.soccer.mdp import BALL, BALL_RADIUS, BLUE, RED
 from mjlab_microduck.tasks import mdp as microduck_mdp
 
@@ -53,7 +53,6 @@ DECISION_DT = 0.1  # the match policy decides at 10 Hz; the walker runs 5 ticks 
 DECIMATION = round(DECISION_DT / PHYSICS_DT)
 EPISODE_LENGTH_S = 45.0
 
-KICKOFF_X = 0.6  # each duck starts this far into its own half
 TRUNK_Z = 0.125  # velstand's reset height
 KICKOFF_NOISE = {"x": (-0.15, 0.15), "y": (-0.3, 0.3), "yaw": (-0.35, 0.35)}
 BALL_NOISE = {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}

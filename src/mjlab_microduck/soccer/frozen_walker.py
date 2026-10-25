@@ -25,6 +25,11 @@ WALKER_FILE = "velstand.onnx"
 OBS_DIM = 61
 ACTION_DIM = 14
 
+# velstand's command ranges in training (`microduck_velocity_env_cfg.py` twist): asking for more is
+# out of distribution, and the walker answers out-of-distribution twists by falling over. Here and
+# not in `actions.py` so the duck-sim referee can import it without pulling in mjlab.
+TWIST_LIMITS = (0.4, 0.3, 1.0)
+
 
 def walker_path(filename: str = WALKER_FILE, revision: str = POLICY_VERSION) -> Path:
     """The walker on disk, fetched from the Hub once and cached by huggingface_hub."""

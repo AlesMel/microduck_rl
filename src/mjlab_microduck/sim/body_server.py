@@ -258,12 +258,14 @@ class Body:
 
     # ── placement ─────────────────────────────────────────────────────────
 
-    def place(self, pose: dict[str, float] | None, trunk_z: float, offset_y: float) -> None:
+    def place(
+        self, pose: dict[str, float] | None, trunk_z: float, offset_y: float, x: float = 0.0, yaw: float = 0.0
+    ) -> None:
         data = self.world.data
-        data.qpos[self.trunk + 0] = 0.0
+        data.qpos[self.trunk + 0] = x
         data.qpos[self.trunk + 1] = offset_y
         data.qpos[self.trunk + 2] = trunk_z
-        data.qpos[self.trunk + 3 : self.trunk + 7] = [1.0, 0.0, 0.0, 0.0]
+        data.qpos[self.trunk + 3 : self.trunk + 7] = [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)]
         data.qvel[self.trunk_dof : self.trunk_dof + 6] = 0.0
         for slot, wire_index in enumerate(self.to_wire):
             name = JOINT_NAMES[wire_index]
@@ -436,6 +438,102 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+# ── the football pitch ────────────────────────────────────────────────────────
+
+
+def is_soccer(scene: Path) -> bool:
+    return scene.name.startswith("scene_soccer")
+
+
+def kickoff_spot(index: int) -> tuple[float, float]:
+    """(x, yaw) for duck `index`: a at blue's end facing +x, b at red's facing -x, and so on."""
+    from mjlab_microduck.soccer.field import KICKOFF_X
+
+    return (-KICKOFF_X, 0.0) if index % 2 == 0 else (KICKOFF_X, np.pi)
+
+
+class Referee:
+    """What a match needs from the world and the daemons cannot give: where everything is.
+
+    A robot has no idea where the ball or the other duck are, so `soccer_referee.py` asks here —
+    the simulator's stand-in for an overhead camera. It also restarts play after a goal, which on
+    a real pitch is somebody carrying the ducks back.
+    """
+
+    def __init__(self, world: World, trunk_z: float):
+        self.world = world
+        self.trunk_z = trunk_z
+        model = world.model
+        self.trunks = [
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{b.prefix}trunk_base") for b in world.bodies
+        ]
+        self.ball = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "ball")
+        if self.ball < 0:
+            raise SystemExit("a soccer scene needs a body named 'ball'")
+        joint = model.body_jntadr[self.ball]
+        self.ball_qpos = int(model.jnt_qposadr[joint])
+        self.ball_qvel = int(model.jnt_dofadr[joint])
+
+    def _velocity(self, body: int) -> tuple[list[float], list[float]]:
+        """(linear, angular) of a body's frame, both in the world frame."""
+        vel = np.zeros(6)
+        mujoco.mj_objectVelocity(self.world.model, self.world.data, mujoco.mjtObj.mjOBJ_BODY, body, vel, 0)
+        return vel[3:].tolist(), vel[:3].tolist()
+
+    def state(self) -> dict:
+        data = self.world.data
+        with self.world.lock:
+            ducks = []
+            for body in self.trunks:
+                lin, ang = self._velocity(body)
+                quat = data.xquat[body].copy()
+                ducks.append({
+                    "pos": data.xpos[body].tolist(),
+                    "quat": quat.tolist(),
+                    "linvel": lin,
+                    "angvel": ang,
+                    "gravity_z": float(gravity_in_trunk(quat)[2]),
+                })
+            ball_lin, _ = self._velocity(self.ball)
+            return {"time": float(data.time), "ducks": ducks, "ball": {"pos": data.xpos[self.ball].tolist(), "vel": ball_lin}}
+
+    def place_ball(self) -> None:
+        data = self.world.data
+        data.qpos[self.ball_qpos : self.ball_qpos + 7] = [0.0, 0.0, 0.035, 1.0, 0.0, 0.0, 0.0]
+        data.qvel[self.ball_qvel : self.ball_qvel + 6] = 0.0
+
+    def kickoff(self) -> None:
+        """Ball on the centre spot, each duck standing on its kickoff spot."""
+        with self.world.lock:
+            for body in self.world.bodies:
+                x, yaw = kickoff_spot(body.index)
+                body.place(None, self.trunk_z, offset_y=0.0, x=x, yaw=yaw)
+            self.place_ball()
+            mujoco.mj_forward(self.world.model, self.world.data)
+
+
+class RefereeHandler(socketserver.StreamRequestHandler):
+    """Newline-framed JSON, like the duck ports: `{"op": "world"}` or `{"op": "kickoff"}`."""
+
+    def handle(self) -> None:
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        referee: Referee = self.server.referee
+        for raw in self.rfile:
+            try:
+                op = json.loads(raw).get("op")
+                if op == "world":
+                    answer = referee.state()
+                elif op == "kickoff":
+                    referee.kickoff()
+                    answer = {}
+                else:
+                    raise ValueError(f"unknown op {op!r}")
+            except Exception as error:
+                answer = {"error": str(error)}
+            self.wfile.write((json.dumps(answer) + "\n").encode())
+            self.wfile.flush()
+
+
 def run(world: World, headless: bool) -> None:
     """Step in real time.
 
@@ -520,6 +618,12 @@ def main() -> None:
     parser.add_argument("--frame-port", type=int, default=7901, help="the first camera's port")
     parser.add_argument("--camera-fps", type=int, default=CAMERA_FPS)
     parser.add_argument(
+        "--referee-port",
+        type=int,
+        default=7800,
+        help="soccer scenes only: where `soccer_referee.py` reads the world and calls kickoffs",
+    )
+    parser.add_argument(
         "--limp",
         action="store_true",
         help="start with no torque, so a duck collapses where it stands — a robot found on the "
@@ -550,9 +654,14 @@ def main() -> None:
     elif args.cameras.strip():
         wanted = {ord(c.strip()) - ord("a") for c in args.cameras.split(",") if c.strip()}
     servers = []
+    soccer = is_soccer(args.scene)
     for index in range(args.ducks):
         body = Body(world, index, limp=args.limp)
-        body.place(pose, trunk_z, offset_y=index * SPACING)
+        if soccer:
+            x, yaw = kickoff_spot(index)
+            body.place(pose, trunk_z, offset_y=0.0, x=x, yaw=yaw)
+        else:
+            body.place(pose, trunk_z, offset_y=index * SPACING)
         world.bodies.append(body)
         # Kinematics before anything can be asked for. `site_xpos` and `site_xmat` are unpopulated
         # until a forward pass has run — zero, not stale — and a ToF read that arrives first casts a
@@ -571,6 +680,16 @@ def main() -> None:
             frames.fps = args.camera_fps
             threading.Thread(target=frames.serve_forever, daemon=True).start()
             servers.append(frames)
+
+    if soccer:
+        referee = Referee(world, HOME_TRUNK_Z)
+        referee.place_ball()
+        mujoco.mj_forward(world.model, world.data)
+        server = Server((args.host, args.referee_port), RefereeHandler)
+        server.referee = referee
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        print(f"== referee on {args.host}:{args.referee_port}", flush=True)
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
     for index in range(args.ducks):

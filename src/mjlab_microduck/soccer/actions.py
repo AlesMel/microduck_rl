@@ -21,14 +21,10 @@ import torch
 
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 
-from mjlab_microduck.soccer.frozen_walker import FrozenMlp, walker_path
+from mjlab_microduck.soccer.frozen_walker import TWIST_LIMITS, FrozenMlp, walker_path
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
-
-# velstand's command ranges in training (`microduck_velocity_env_cfg.py` twist): asking for more is
-# out of distribution, and the walker answers out-of-distribution twists by falling over.
-TWIST_LIMITS = (0.4, 0.3, 1.0)
 
 # Head and body slots of the 61D obs carry velstand's idle command: all zero (manifest `idle`).
 _HEAD_BODY_DIM = 10

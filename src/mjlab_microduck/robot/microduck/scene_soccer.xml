@@ -1,0 +1,54 @@
+<mujoco model="scene_soccer">
+    <!-- duck-sim's football pitch: `DUCK_SIM_DUCKS=2 DUCK_SIM_SCENE=soccer scripts/duck-sim`.
+         The all-collisions duck (the model velstand and the Soccer-1v1 task use, and the one
+         body_server attaches for every extra duck), the 70 mm kick ball, and the pitch that
+         `python -m mjlab_microduck.soccer.field` writes from the same code training uses.
+         body_server places the ducks at their kickoff spots and the ball on the centre spot;
+         the keyframes only supply joint poses, with the ball's 7 qpos appended because its
+         freejoint is part of nq. -->
+    <include file="robot_allcollisions.xml" />
+    <include file="ball.xml" />
+    <include file="soccer_field.xml" />
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+        <rgba haze="0.15 0.25 0.35 1" />
+        <global azimuth="90" elevation="-55" />
+    </visual>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512"
+            height="3072" />
+        <texture type="2d" name="pitch" builtin="checker" mark="edge" rgb1="0.18 0.45 0.2"
+            rgb2="0.15 0.4 0.17" markrgb="0.25 0.5 0.27" width="300" height="300" />
+        <material name="pitch" texture="pitch" texuniform="true" texrepeat="6 6" reflectance="0.1" />
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 3.5" dir="0 0 -1" directional="true" />
+        <geom name="floor" size="0 0 0.05" pos="0 0 0" type="plane" material="pitch" />
+    </worldbody>
+
+    <keyframe>
+        <key name="STAND" qpos="
+        0 0 0.12 1 0 0 0
+        0 -0.08726646259971647 -0.457924 -0.004940 0.452984
+        0.3490658503988659 0.3490658503988659 0 0
+        0 0.08726646259971647 0.457924 0.004940 -0.452984
+        0 0 0.035 1 0 0 0"
+         ctrl="
+        0 -0.08726646259971647 -0.457924 -0.004940 0.452984
+        0.3490658503988659 0.3490658503988659 0 0
+        0 0.08726646259971647 0.457924 0.004940 -0.452984"
+        />
+        <key name="SIT" qpos="
+        0 0 0.07 1 0 0 0
+        0 0 -0.5236 1.0472
+        0 0.5 1.6 0
+        0 0 0 0.5236 -1.0472 0
+        0 0 0.035 1 0 0 0" ctrl="
+        0 0 -0.5236 1.0472 0
+        0.5 1.6 0 0 0
+        0 0.5236 -1.0472 0"/>
+    </keyframe>
+</mujoco>
