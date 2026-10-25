@@ -1,9 +1,10 @@
 """Soccer 1v1: two ducks, one ball, two goals — a match the high-level policy learns by self-play.
 
-The learner is blue. Its action is a twist (vx, vy, yaw rate in [-1, 1], scaled to velstand's
-training ranges); the frozen `velstand.onnx` walks it (`soccer/actions.py`). Red is the same walker
-driven by a frozen snapshot of the learner, swapped in by `SelfPlayRunner` — until the first one
-exists red just stands there.
+The learner is blue. Its action is a twist (vx, vy, yaw rate in [-1, 1], mapped by
+`frozen_walker.action_to_twist` inside velstand's training ranges, reverse capped at 0.1 m/s); the
+frozen `velstand.onnx` walks it (`soccer/actions.py`). Red is the same walker driven by a frozen
+snapshot of the learner, swapped in by `SelfPlayRunner` — until the first one exists red just
+stands there.
 
 One episode is one point, like Unity's soccer: it ends on a goal, on the clock (a draw), or if the
 ball escapes the pitch. Reward is Unity's: +1 for a goal, -1 for conceding, and an existential
@@ -60,6 +61,9 @@ BALL_NOISE = {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}
 GOAL_WEIGHT = 1.0 / DECISION_DT
 APPROACH_WEIGHT = 0.5
 BALL_TO_GOAL_WEIGHT = 1.0
+# Facing the ball pays w per second and can be collected standing still, so it is kept small: at
+# most 4.5 over a full point, against the speed terms that only pay while something moves.
+FACE_BALL_WEIGHT = 0.1
 # Shaping off by ~2000 iterations: long enough to find the ball and the goal, short enough that
 # the match reward is what the late policy is shaped by.
 SHAPING_STAGES = ((0, 1.0), (1000, 0.5), (1500, 0.25), (2000, 0.0))
@@ -167,6 +171,7 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "existential": RewardTermCfg(func=soccer_mdp.existential, weight=-1.0 / EPISODE_LENGTH_S),
             "ball_approach": RewardTermCfg(func=soccer_mdp.ball_approach_speed, weight=APPROACH_WEIGHT),
             "ball_to_goal": RewardTermCfg(func=soccer_mdp.ball_to_goal_speed, weight=BALL_TO_GOAL_WEIGHT),
+            "face_ball": RewardTermCfg(func=soccer_mdp.facing_ball, weight=FACE_BALL_WEIGHT),
             "fallen": RewardTermCfg(func=soccer_mdp.fallen, weight=-0.5),
         },
         terminations={
@@ -179,6 +184,7 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         curriculum={
             "ball_approach_weight": _shaping_curriculum("ball_approach", APPROACH_WEIGHT),
             "ball_to_goal_weight": _shaping_curriculum("ball_to_goal", BALL_TO_GOAL_WEIGHT),
+            "face_ball_weight": _shaping_curriculum("face_ball", FACE_BALL_WEIGHT),
         },
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.WORLD,
@@ -202,6 +208,7 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.curriculum = {}
         cfg.rewards["ball_approach"].weight = 0.0
         cfg.rewards["ball_to_goal"].weight = 0.0
+        cfg.rewards["face_ball"].weight = 0.0
     return cfg
 
 

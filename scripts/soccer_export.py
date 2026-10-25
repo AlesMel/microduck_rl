@@ -21,7 +21,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
-from mjlab_microduck.soccer.frozen_walker import TWIST_LIMITS
+from mjlab_microduck.soccer.frozen_walker import TWIST_LOWER, TWIST_UPPER
 from mjlab_microduck.soccer.mdp import OBS_DIM
 
 TASK = "Mjlab-Soccer-1v1-MicroDuck"
@@ -45,8 +45,9 @@ def main() -> None:
     for key, value in {
         "task": TASK,
         "obs_dim": str(OBS_DIM),
-        "action": "twist in [-1, 1]: vx, vy, yaw rate",
-        "twist_limits": ",".join(str(v) for v in TWIST_LIMITS),
+        "action": "[-1, 1]^3 -> vx, vy, yaw rate: a * upper for a >= 0, a * -lower for a < 0",
+        "twist_lower": ",".join(str(v) for v in TWIST_LOWER),
+        "twist_upper": ",".join(str(v) for v in TWIST_UPPER),
         "checkpoint": str(args.checkpoint),
     }.items():
         entry = model.metadata_props.add()

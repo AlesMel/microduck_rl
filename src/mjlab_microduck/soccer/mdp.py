@@ -233,6 +233,22 @@ def ball_to_goal_speed(env: ManagerBasedRlEnv, team: int = 1, max_speed: float =
     return speed.clamp(-max_speed, max_speed)
 
 
+def facing_ball(env: ManagerBasedRlEnv, asset_name: str = BLUE, near: float = 0.12) -> torch.Tensor:
+    """cos(angle between the duck's heading and the ball), in [-1, 1]: +1 facing it, -1 back to it.
+
+    The first long run learned to approach the ball backwards (see `TWIST_LOWER`); nothing it was
+    paid for cared which way it faced. Inside `near` (about the ball touching the feet) it pays
+    nothing either way, so dribbling and turning with the ball are not taxed.
+    """
+    duck = env.scene[asset_name].data
+    to_ball = (_local(env, BALL) - _local(env, asset_name))[:, :2]
+    dist = to_ball.norm(dim=-1)
+    yaw = _yaw(duck.root_link_quat_w)
+    heading = torch.stack((torch.cos(yaw), torch.sin(yaw)), dim=-1)
+    cos = (heading * to_ball).sum(-1) / dist.clamp_min(1e-6)
+    return torch.where(dist > near, cos, torch.zeros_like(cos))
+
+
 def fallen(env: ManagerBasedRlEnv, asset_name: str = BLUE) -> torch.Tensor:
     """1 while the duck is down. A cost (>= 0), so its weight is negative."""
     return (env.scene[asset_name].data.projected_gravity_b[:, 2] > FALLEN_GRAVITY_Z).float()

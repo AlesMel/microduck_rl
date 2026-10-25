@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -29,6 +30,28 @@ ACTION_DIM = 14
 # out of distribution, and the walker answers out-of-distribution twists by falling over. Here and
 # not in `actions.py` so the duck-sim referee can import it without pulling in mjlab.
 TWIST_LIMITS = (0.4, 0.3, 1.0)
+
+# What the match policy may ask for, inside those ranges: (lower, upper) per axis. Reverse is
+# capped at 0.1 m/s. With the full -0.4 the first long run (2026-10-25, 900 iterations) learned to
+# turn its back on the ball and creep at it backwards — 83% of decisions at iteration 800 — where
+# velstand barely moves (-0.03 m/s), and the match stalled into 80% draws. A duck that has to turn
+# around to cover ground plays football facing the ball.
+TWIST_LOWER = (-0.1, -0.3, -1.0)
+TWIST_UPPER = (0.4, 0.3, 1.0)
+
+
+def action_to_twist(action):
+    """Map a policy action in [-1, 1]^3 to a twist, separately for each sign so 0 is still "stand".
+
+    Works on torch tensors and numpy arrays alike: training, the exporter and the duck-sim referee
+    all go through here, so the three cannot disagree about what an action means.
+    """
+    a = action.clip(-1.0, 1.0)
+    if isinstance(a, torch.Tensor):
+        upper, lower = a.new_tensor(TWIST_UPPER), a.new_tensor(TWIST_LOWER)
+    else:
+        upper, lower = np.asarray(TWIST_UPPER, dtype=a.dtype), np.asarray(TWIST_LOWER, dtype=a.dtype)
+    return a * upper * (a >= 0) - a * lower * (a < 0)
 
 
 def walker_path(filename: str = WALKER_FILE, revision: str = POLICY_VERSION) -> Path:

@@ -27,7 +27,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-from mjlab_microduck.soccer.frozen_walker import TWIST_LIMITS
+from mjlab_microduck.soccer.frozen_walker import action_to_twist
 from mjlab_microduck.soccer.mdp import goal_flags, side_obs
 
 DECISION_DT = 0.1
@@ -80,7 +80,7 @@ class Policy:
 
     def twist(self, obs: torch.Tensor) -> np.ndarray:
         action = self.session.run(None, {self.input: obs.numpy().astype(np.float32)})[0][0]
-        return np.clip(action, -1.0, 1.0) * np.asarray(TWIST_LIMITS)
+        return action_to_twist(action)
 
 
 def observe(world: dict, team: int, time_left: float) -> torch.Tensor:

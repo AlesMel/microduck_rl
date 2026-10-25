@@ -21,7 +21,7 @@ import torch
 
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 
-from mjlab_microduck.soccer.frozen_walker import TWIST_LIMITS, FrozenMlp, walker_path
+from mjlab_microduck.soccer.frozen_walker import FrozenMlp, action_to_twist, walker_path
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -61,7 +61,6 @@ class WalkerCommandAction(JointPositionAction):
         super().__init__(cfg=cfg, env=env)
         n = self.num_envs
         self.walker = _shared_walker(str(cfg.walker_file or walker_path()), self.device)
-        self._limits = torch.tensor(TWIST_LIMITS, device=self.device)
         self._twist = torch.zeros(n, 3, device=self.device)
         self._hl_action = torch.zeros(n, 3 if cfg.source == "policy" else 0, device=self.device)
         self._walker_action = torch.zeros(n, self._num_targets, device=self.device)
@@ -89,11 +88,11 @@ class WalkerCommandAction(JointPositionAction):
     def process_actions(self, actions: torch.Tensor) -> None:
         if self.cfg.source == "policy":
             self._hl_action[:] = actions
-            self._twist[:] = actions.clamp(-1.0, 1.0) * self._limits
+            self._twist[:] = action_to_twist(actions)
         elif self.opponent_policy is not None:
             obs = self._env.obs_buf[self.cfg.opponent_obs_group]
             with torch.no_grad():
-                self._twist[:] = self.opponent_policy(obs).clamp(-1.0, 1.0) * self._limits
+                self._twist[:] = action_to_twist(self.opponent_policy(obs))
         else:
             self._twist.zero_()
         # A new decision starts a walker tick, so the twist lands without a 20 ms wait.

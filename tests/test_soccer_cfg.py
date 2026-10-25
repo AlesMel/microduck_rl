@@ -49,7 +49,7 @@ def test_reward_signs(cfg):
 
 
 def test_shaping_anneals_to_zero(cfg):
-    for name in ("ball_approach_weight", "ball_to_goal_weight"):
+    for name in ("ball_approach_weight", "ball_to_goal_weight", "face_ball_weight"):
         stages = cfg.curriculum[name].params["weight_stages"]
         assert stages[0]["weight"] > 0 and stages[-1]["weight"] == 0.0
 
@@ -116,6 +116,20 @@ def test_goal_flags():
     blue, red = goal_flags(balls)
     assert blue.tolist() == [True, False, False, False, False]
     assert red.tolist() == [False, True, False, False, False]
+
+
+def test_twist_mapping_caps_reverse():
+    """0 stands still, +1 is velstand's full forward, -1 only a slow reverse — torch and numpy alike."""
+    import numpy as np
+
+    from mjlab_microduck.soccer.frozen_walker import TWIST_LIMITS, action_to_twist
+
+    actions = torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [-1.0, -1.0, -1.0], [-3.0, 0.5, 2.0]])
+    expected = torch.tensor([[0.0, 0.0, 0.0], [0.4, 0.3, 1.0], [-0.1, -0.3, -1.0], [-0.1, 0.15, 1.0]])
+    torch.testing.assert_close(action_to_twist(actions), expected)
+    np.testing.assert_allclose(action_to_twist(actions.numpy()), expected.numpy(), atol=1e-6)
+    # Never beyond what velstand was trained on.
+    assert (action_to_twist(actions).abs() <= torch.tensor(TWIST_LIMITS)).all()
 
 
 def test_ball_out():
