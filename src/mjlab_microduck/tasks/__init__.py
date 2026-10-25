@@ -278,3 +278,16 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+# Soccer 1v1 — a high-level match policy steering the frozen velstand walker, trained by
+# self-play against snapshots of itself. Not a 61D family policy: nothing here goes into a slot.
+from .microduck_soccer_env_cfg import make_microduck_soccer_env_cfg, MicroduckSoccerRlCfg
+from mjlab_microduck.soccer.selfplay_runner import SelfPlayRunner
+
+register_mjlab_task(
+    task_id="Mjlab-Soccer-1v1-MicroDuck",
+    env_cfg=make_microduck_soccer_env_cfg(),
+    play_env_cfg=make_microduck_soccer_env_cfg(play=True),
+    rl_cfg=MicroduckSoccerRlCfg,
+    runner_cls=SelfPlayRunner,
+)
