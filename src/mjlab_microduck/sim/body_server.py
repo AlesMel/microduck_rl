@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import socketserver
 import threading
@@ -118,7 +119,7 @@ def build_world(scene: Path, count: int) -> mujoco.MjModel:
     other" is what every social behaviour is about.
     """
     if count == 1:
-        return mujoco.MjModel.from_xml_path(str(scene))
+        return with_wheel_friction(mujoco.MjModel.from_xml_path(str(scene)))
 
     spec = mujoco.MjSpec.from_file(str(scene))
     for index in range(1, count):
@@ -127,7 +128,21 @@ def build_world(scene: Path, count: int) -> mujoco.MjModel:
         robot = mujoco.MjSpec.from_file(str(ROBOT_ONLY))
         frame = spec.worldbody.add_frame(pos=[0.0, index * SPACING, 0.0])
         spec.attach(robot, prefix=duck_prefix(index), frame=frame)
-    return spec.compile()
+    return with_wheel_friction(spec.compile())
+
+
+def with_wheel_friction(model: mujoco.MjModel) -> mujoco.MjModel:
+    """Give the roller model's wheels the bearing friction `infer_policy.py --roller` gives them.
+
+    The XML leaves it at zero because a non-zero frictionloss there breaks training, so it has to be
+    set after loading — and a wheel with none lets the duck roll out from under itself before the
+    roller policy ever runs. A no-op on the legged models, which have no wheels.
+    """
+    for joint in range(model.njnt):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
+        if name and re.match(r"^(d\d+_)?passive_.*wheel", name):
+            model.dof_frictionloss[model.jnt_dofadr[joint]] = 0.003
+    return model
 
 
 def pose_table(scene: Path, keyframe: str) -> tuple[dict[str, float] | None, float]:
