@@ -267,20 +267,46 @@ def ball_to_goal_speed(env: ManagerBasedRlEnv, team: int = 1, max_speed: float =
     return speed.clamp(-max_speed, max_speed)
 
 
-def facing_ball(env: ManagerBasedRlEnv, asset_name: str = BLUE, near: float = 0.12) -> torch.Tensor:
-    """cos(angle between the duck's heading and the ball), in [-1, 1]: +1 facing it, -1 back to it.
+def _heading(env: ManagerBasedRlEnv, asset_name: str) -> torch.Tensor:
+    yaw = _yaw(env.scene[asset_name].data.root_link_quat_w)
+    return torch.stack((torch.cos(yaw), torch.sin(yaw)), dim=-1)
 
-    The first long run learned to approach the ball backwards (see `TWIST_LOWER`); nothing it was
-    paid for cared which way it faced. Inside `near` (about the ball touching the feet) it pays
-    nothing either way, so dribbling and turning with the ball are not taxed.
+
+def _unit(v: torch.Tensor) -> torch.Tensor:
+    return v / v.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+
+def approach_facing(env: ManagerBasedRlEnv, asset_name: str = BLUE, max_speed: float = 0.5) -> torch.Tensor:
+    """Closing speed on the ball (m/s, >= 0, clamped) times cos(heading, ball): paid only for
+    walking *at* the ball face first. Negative when closing on it backwards.
+
+    Replaces a plain "face the ball" term, which paid w per second for staring at the ball and
+    nothing inside 12 cm: the kick run (2026-10-26) learned to hover 20-25 cm away facing it — the
+    kick zone is 5-14 cm — and stopped kicking altogether (0 kicks, 100% draws by iteration 600).
+    This one pays nothing standing still and nothing for keeping a distance, so the only way to
+    collect it is to arrive at the ball facing it, which is where a kick starts.
     """
-    duck = env.scene[asset_name].data
-    to_ball = (_local(env, BALL) - _local(env, asset_name))[:, :2]
-    dist = to_ball.norm(dim=-1)
-    yaw = _yaw(duck.root_link_quat_w)
-    heading = torch.stack((torch.cos(yaw), torch.sin(yaw)), dim=-1)
-    cos = (heading * to_ball).sum(-1) / dist.clamp_min(1e-6)
-    return torch.where(dist > near, cos, torch.zeros_like(cos))
+    duck, ball = env.scene[asset_name].data, env.scene[BALL].data
+    to_ball = _unit((_local(env, BALL) - _local(env, asset_name))[:, :2])
+    closing = ((duck.root_link_lin_vel_w[:, :2] - ball.root_link_lin_vel_w[:, :2]) * to_ball).sum(-1)
+    facing = (_heading(env, asset_name) * to_ball).sum(-1)
+    return closing.clamp(0.0, max_speed) * facing
+
+
+def kick_aim(env: ManagerBasedRlEnv, asset_name: str = BLUE, team: int = 1) -> torch.Tensor:
+    """On the step a kick fires: cos(the duck's heading, ball -> centre of the goal it attacks).
+    +1 for a kick straight at goal, -1 for one at its own; 0 on every other step.
+
+    A kick is the only shot this duck has — walking pushes the ball at ~0.12 m/s — and the kick run
+    learned to stop kicking because a kick was never worth anything until a goal, which random
+    kicks almost never produced. This pays the aim, not the kick, so kicking the ball anywhere
+    but forward is not a way to collect it.
+    """
+    fired = env.action_manager.get_term(ACTION_TERMS[team]).fired_now
+    goal = _local(env, BALL).new_tensor((team * FIELD.half_length, 0.0))
+    to_goal = _unit(goal - _local(env, BALL)[:, :2])
+    aim = (_heading(env, asset_name) * to_goal).sum(-1)
+    return torch.where(fired, aim, torch.zeros_like(aim))
 
 
 def fallen(env: ManagerBasedRlEnv, asset_name: str = BLUE) -> torch.Tensor:

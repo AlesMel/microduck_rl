@@ -44,12 +44,17 @@ def test_reward_signs(cfg):
     # Cost functions return >= 0, so their weights must be negative (AGENTS.md sign convention).
     for cost in ("existential", "fallen"):
         assert r[cost].weight < 0, cost
+    # Shaping that pays for doing the right thing is positive, and none of it may pay a duck for
+    # standing still (the kick run learned to hover when one did).
+    for shaping in ("ball_approach", "ball_to_goal", "approach_facing", "kick_aim"):
+        assert r[shaping].weight > 0, shaping
+    assert "face_ball" not in r
     # A full match of existential penalty is worth one conceded goal, no more.
     assert math.isclose(r["existential"].weight * cfg.episode_length_s, -1.0)
 
 
 def test_shaping_anneals_to_zero(cfg):
-    for name in ("ball_approach_weight", "ball_to_goal_weight", "face_ball_weight"):
+    for name in ("ball_approach_weight", "ball_to_goal_weight", "approach_facing_weight", "kick_aim_weight"):
         stages = cfg.curriculum[name].params["weight_stages"]
         assert stages[0]["weight"] > 0 and stages[-1]["weight"] == 0.0
 

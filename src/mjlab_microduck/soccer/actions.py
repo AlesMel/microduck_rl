@@ -91,6 +91,7 @@ class WalkerCommandAction(JointPositionAction):
         self._kick_left = torch.zeros(n, dtype=torch.long, device=self.device)
         self._kick_foot = torch.full((n,), KICK_NONE, dtype=torch.long, device=self.device)
         self.kicks_fired = torch.zeros((), device=self.device)  # since the runner last read it
+        self.fired_now = torch.zeros(n, dtype=torch.bool, device=self.device)  # this decision's kicks
         # Set by the self-play runner: (N, obs) -> (N, 4) in [-1, 1], or None for a standing opponent.
         self.opponent_policy: Callable[[torch.Tensor], torch.Tensor] | None = None
 
@@ -133,6 +134,7 @@ class WalkerCommandAction(JointPositionAction):
         self._kick_left[:] = torch.where(fire, torch.full_like(self._kick_left, self._kick_ticks), self._kick_left)
         self._kick_foot[:] = torch.where(fire, foot, self._kick_foot)
         self.kicks_fired += fire.sum()
+        self.fired_now[:] = fire
         # A new decision starts a walker tick, so the twist lands without a 20 ms wait.
         self._substep = 0
 
