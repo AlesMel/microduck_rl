@@ -5,7 +5,9 @@ a kick that ended in a goal was too rare to learn from, and the policies settled
 dense shaping paid for. Each reset now draws one of four situations, the same reverse-curriculum
 idea AGENTS.md recommends for tricks whose last mile never gets on-policy data:
 
-- KICKOFF:  the match as it is played — each duck on its own half, ball on the centre spot.
+- KICKOFF:  the match as it is played — ball on the centre spot, the kicking team's duck just
+            behind it facing the goal it attacks, the other duck back in its own half
+            (`field.KICKER_BALL_DIST`, `field.DEFENDER_X`). Who kicks off is per env (`kicker`).
 - SHOOT:    the ball at blue's foot (BallKick's placement), blue facing the red goal give or take,
             anywhere from just inside its own half to 0.4 m from goal. Red is back in blue's half.
 - APPROACH: blue anywhere facing anywhere, the ball 0.5-1.5 m away in any direction.
@@ -22,7 +24,7 @@ from dataclasses import dataclass
 
 import torch
 
-from mjlab_microduck.soccer.field import FIELD, KICKOFF_X
+from mjlab_microduck.soccer.field import DEFENDER_X, FIELD, KICKER_BALL_DIST
 
 KICKOFF, SHOOT, APPROACH, DEFEND = range(4)
 NAMES = ("kickoff", "shoot", "approach", "defend")
@@ -79,18 +81,29 @@ def _clip(p: torch.Tensor) -> torch.Tensor:
     return torch.stack((p[..., 0].clamp(-X_MAX, X_MAX), p[..., 1].clamp(-Y_MAX, Y_MAX)), dim=-1)
 
 
-def sample(kinds: torch.Tensor, generator: torch.Generator | None = None) -> Layout:
-    """A starting layout for each env, by its situation in `kinds` (KICKOFF / SHOOT / ...)."""
+def sample(kinds: torch.Tensor, generator: torch.Generator | None = None, kicker: torch.Tensor | None = None) -> Layout:
+    """A starting layout for each env, by its situation in `kinds` (KICKOFF / SHOOT / ...).
+
+    `kicker`: per env, +1 when blue kicks off and -1 when red does (default: blue)."""
     n, dev, g = kinds.shape[0], kinds.device, generator
     u = lambda lo, hi: _u(n, lo, hi, dev, g)
     foot = torch.where(torch.rand(n, device=dev, generator=g) < 0.5, 1.0, -1.0)
     red_goal = torch.tensor([FIELD.half_length, 0.0], device=dev)
     blue_goal = -red_goal
 
-    # KICKOFF — as the original reset: ±0.15/±0.3 m and ±20° around the kickoff spots.
-    k_blue, k_blue_yaw = _xy(-KICKOFF_X + u(-0.15, 0.15), u(-0.3, 0.3)), u(-0.35, 0.35)
-    k_red, k_red_yaw = _xy(KICKOFF_X + u(-0.15, 0.15), u(-0.3, 0.3)), torch.pi + u(-0.35, 0.35)
+    # KICKOFF — the kicker behind the ball facing the goal it attacks within ±10°, the defender
+    # back in its own half (±0.1/±0.3 m), facing the ball within ±20°.
+    if kicker is None:
+        kicker = torch.ones(n, device=dev)
+    blue_kicks = (kicker > 0).unsqueeze(-1)
     k_ball = _xy(u(-0.05, 0.05), u(-0.05, 0.05))
+    k_kick_yaw = u(-0.17, 0.17)
+    k_kick_dir = _xy(torch.cos(k_kick_yaw), torch.sin(k_kick_yaw))
+    k_def = _xy(DEFENDER_X + u(-0.1, 0.1), u(-0.3, 0.3))
+    k_blue = torch.where(blue_kicks, k_ball - k_kick_dir * KICKER_BALL_DIST, -k_def)
+    k_red = torch.where(blue_kicks, k_def, k_ball + k_kick_dir * KICKER_BALL_DIST)
+    k_blue_yaw = torch.where(blue_kicks[:, 0], k_kick_yaw, _heading(k_ball, k_blue) + u(-0.35, 0.35))
+    k_red_yaw = torch.where(blue_kicks[:, 0], _heading(k_ball, k_red) + u(-0.35, 0.35), torch.pi + k_kick_yaw)
 
     # SHOOT — ball at blue's foot, blue aimed at the red goal within ±15°.
     s_ball = _xy(u(-0.2, FIELD.half_length - 0.4), u(-0.6, 0.6))

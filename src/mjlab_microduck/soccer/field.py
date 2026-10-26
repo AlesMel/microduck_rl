@@ -46,6 +46,13 @@ FIELD = Field()
 # Each duck kicks off this far into its own half, facing the other goal — in training and in
 # duck-sim alike.
 KICKOFF_X = 0.6
+# Kickoff possession, as in football: the two teams take turns to kick off. The kicker stands
+# `KICKER_BALL_DIST` behind the ball, facing the goal it attacks; the other duck starts back at
+# `DEFENDER_X` in its own half. Symmetric kickoffs had both ducks reach the ball together, and a
+# contested ball can only be shoved: 23-25 of 32 oracle-vs-oracle points were draws. From here
+# the kicker has ~4 s for one clean stop-then-kick shot before the defender can reach the ball.
+KICKER_BALL_DIST = 0.30
+DEFENDER_X = 0.9
 
 FIELD_XML = Path(__file__).resolve().parents[1] / "robot" / "microduck" / "soccer_field.xml"
 

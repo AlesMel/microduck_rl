@@ -20,7 +20,9 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
-from mjlab_microduck.soccer.mdp import BLUE, RED, ball_to_goal_speed, match_stats
+from mjlab_microduck.soccer.mdp import (
+    BLUE, OPP_ORACLE, OPP_SNAPSHOT, OPP_STATUE, RED, ball_to_goal_speed, match_stats, opponent_kind,
+)
 from mjlab_microduck.soccer.oracle import Oracle
 
 TASK = "Mjlab-Soccer-1v1-MicroDuck"
@@ -57,6 +59,8 @@ def main() -> None:
     else:
         net = _checkpoint_policy(env, args.blue, args.device)
         blue = lambda obs: net(obs["actor"])
+    # Who red is decides kickoff possession (blue always kicks off against a statue), so say.
+    opponent_kind(raw)[:] = {"statue": OPP_STATUE, "oracle": OPP_ORACLE}.get(args.red, OPP_SNAPSHOT)
     if args.red == "statue":
         red_term.opponent_policy = None
     elif args.red == "oracle":
@@ -64,6 +68,7 @@ def main() -> None:
     else:
         red_term.opponent_policy = _checkpoint_policy(env, args.red, args.device)
 
+    env.reset()  # place the first points for the kind of red just set
     for term in (blue_term, red_term):
         term.kicks_fired.zero_()
         term.kicks_cancelled.zero_()
@@ -81,6 +86,7 @@ def main() -> None:
                 goalward += int((speed > GOALWARD).sum())
                 kicks_seen += int(due.sum())
 
+    by_possession = match_stats(raw).take_scenarios()
     blue_goals, red_goals, draws = match_stats(raw).take()
     points = blue_goals + red_goals + draws
     per = lambda x: x / points if points else float("nan")
@@ -88,6 +94,9 @@ def main() -> None:
           f"red {red_goals:.0f} ({per(red_goals):.2f}/point), draws {draws:.0f}")
     print(f"  blue kicks fired {float(blue_term.kicks_fired):.0f}, cancelled {float(blue_term.kicks_cancelled):.0f}, "
           f"goalward {goalward}/{kicks_seen} ({goalward / max(1, kicks_seen):.0%}); red kicks fired {float(red_term.kicks_fired):.0f}")
+    if "kickoff_kicker_goals" in by_possession:
+        print(f"  by possession: the side kicking off scored {by_possession['kickoff_kicker_goals']:.2f}/point, "
+              f"the other side {by_possession['kickoff_defender_goals']:.2f}/point")
 
 
 if __name__ == "__main__":

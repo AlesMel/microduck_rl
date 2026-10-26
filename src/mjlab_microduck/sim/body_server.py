@@ -445,11 +445,17 @@ def is_soccer(scene: Path) -> bool:
     return scene.name.startswith("scene_soccer")
 
 
-def kickoff_spot(index: int) -> tuple[float, float]:
-    """(x, yaw) for duck `index`: a at blue's end facing +x, b at red's facing -x, and so on."""
-    from mjlab_microduck.soccer.field import KICKOFF_X
+def kickoff_spot(index: int, kicker: int | None = None) -> tuple[float, float]:
+    """(x, yaw) for duck `index`: a at blue's end facing +x, b at red's facing -x, and so on.
 
-    return (-KICKOFF_X, 0.0) if index % 2 == 0 else (KICKOFF_X, np.pi)
+    With `kicker` (0 blue, 1 red) it is a kickoff with possession, as in training: that team's
+    duck stands just behind the centre spot facing the goal it attacks, the other back in its half.
+    """
+    from mjlab_microduck.soccer.field import DEFENDER_X, KICKER_BALL_DIST, KICKOFF_X
+
+    team = index % 2
+    x = KICKOFF_X if kicker is None else KICKER_BALL_DIST if team == kicker else DEFENDER_X
+    return (-x, 0.0) if team == 0 else (x, np.pi)
 
 
 class Referee:
@@ -468,6 +474,7 @@ class Referee:
             mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{b.prefix}trunk_base") for b in world.bodies
         ]
         self.ball = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "ball")
+        self.kicker = 1  # who kicked off last: the first kickoff goes to blue, then they alternate
         if self.ball < 0:
             raise SystemExit("a soccer scene needs a body named 'ball'")
         joint = model.body_jntadr[self.ball]
@@ -503,10 +510,11 @@ class Referee:
         data.qvel[self.ball_qvel : self.ball_qvel + 6] = 0.0
 
     def kickoff(self) -> None:
-        """Ball on the centre spot, each duck standing on its kickoff spot."""
+        """Ball on the centre spot, the other team kicking off this time (`kickoff_spot`)."""
+        self.kicker = 1 - self.kicker
         with self.world.lock:
             for body in self.world.bodies:
-                x, yaw = kickoff_spot(body.index)
+                x, yaw = kickoff_spot(body.index, self.kicker)
                 body.place(None, self.trunk_z, offset_y=0.0, x=x, yaw=yaw)
             self.place_ball()
             mujoco.mj_forward(self.world.model, self.world.data)

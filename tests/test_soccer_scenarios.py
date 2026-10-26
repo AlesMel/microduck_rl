@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from mjlab_microduck.soccer.field import FIELD, KICKOFF_X
+from mjlab_microduck.soccer.field import DEFENDER_X, FIELD, KICKER_BALL_DIST
 from mjlab_microduck.soccer.mdp import KICK_NONE, kick_side, to_frame
 from mjlab_microduck.soccer.scenarios import (
     APPROACH, BALL_CLEARANCE, DEFEND, DUCK_CLEARANCE, KICKOFF, SHOOT, X_MAX, Y_MAX, sample, yaw_quat,
@@ -36,10 +36,21 @@ def test_everyone_on_the_pitch():
 
 
 def test_kickoff_is_the_match():
-    lay = _layout(KICKOFF)
-    assert (lay.blue_xy[:, 0] < 0).all() and (lay.red_xy[:, 0] > 0).all()
-    assert torch.allclose(lay.blue_xy[:, 0].mean(), torch.tensor(-KICKOFF_X), atol=0.02)
-    assert (lay.ball_xy.norm(dim=-1) < 0.08).all()
+    """Ball on the centre spot; the kicker just behind it facing the goal it attacks, the other
+    duck back in its own half — for either team kicking off."""
+    for team in (1.0, -1.0):
+        kicker = torch.full((N,), team)
+        lay = sample(torch.full((N,), KICKOFF, dtype=torch.long), generator=torch.Generator().manual_seed(0), kicker=kicker)
+        assert (lay.blue_xy[:, 0] < 0).all() and (lay.red_xy[:, 0] > 0).all()
+        assert (lay.ball_xy.norm(dim=-1) < 0.08).all()
+        kick_xy, kick_yaw, def_xy = (lay.blue_xy, lay.blue_yaw, lay.red_xy) if team > 0 else (lay.red_xy, lay.red_yaw, lay.blue_xy)
+        to_ball = (lay.ball_xy - kick_xy).norm(dim=-1)
+        assert torch.allclose(to_ball, torch.full((N,), KICKER_BALL_DIST), atol=0.01)
+        # Facing the goal it attacks (+x for blue, -x for red), so the ball is dead ahead.
+        assert (_angle_to(lay.ball_xy, kick_xy, kick_yaw).abs() < 0.2).all()
+        assert (torch.cos(kick_yaw) * team > 0.95).all()
+        assert torch.allclose(def_xy[:, 0].abs().mean(), torch.tensor(DEFENDER_X), atol=0.02)
+        assert ((def_xy - lay.ball_xy).norm(dim=-1) > 0.75).all()
 
 
 def test_shoot_puts_the_ball_at_blues_foot_facing_goal():

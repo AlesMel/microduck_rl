@@ -240,6 +240,8 @@ class MatchStats:
     - blue / red / draws: outcomes of KICKOFF points only — real matches, what Elo is about. The
       practice situations are not a match against the opponent and would skew it.
     - points / blue_goals / red_goals (4,): per practice situation, for `Scenario/*` logging.
+    - kicker_goals / defender_goals: kickoff points won by the side that kicked off, and by the
+      other side.
     - approach_rate: running fraction of APPROACH drills in which blue reached the ball.
     - shoot_rate: running fraction of SHOOT drills blue scored from.
 
@@ -259,6 +261,7 @@ class MatchStats:
     def _zero(self) -> None:
         z = torch.zeros((), device=self._device)
         self.blue = self.red = self.draws = z
+        self.kicker_goals = self.defender_goals = z
         z4 = torch.zeros(len(SCENARIO_NAMES), device=self._device)
         self.points = self.blue_goals = self.red_goals = z4
         # Kickoff outcomes by opponent kind: rows statue / oracle / snapshot, columns win / loss / draw.
@@ -282,6 +285,10 @@ class MatchStats:
             if n > 0:
                 out[f"{name}_score"] = float(self.blue_goals[i]) / n
                 out[f"{name}_concede"] = float(self.red_goals[i]) / n
+        kickoffs = float(self.blue + self.red + self.draws)
+        if kickoffs > 0:
+            out["kickoff_kicker_goals"] = float(self.kicker_goals) / kickoffs
+            out["kickoff_defender_goals"] = float(self.defender_goals) / kickoffs
         out["approach_rate"] = float(self.approach_rate)
         out["shoot_rate"] = float(self.shoot_rate)
         return out
@@ -323,6 +330,16 @@ def scenario(env: ManagerBasedRlEnv) -> torch.Tensor:
     return kinds
 
 
+def kickoff_team(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Per env, who kicks off this (or the next) kickoff point: +1 blue, -1 red. Starts at random,
+    so half the envs open with each team."""
+    kicker = getattr(env, "_soccer_kicker", None)
+    if kicker is None:
+        flip = torch.rand(env.num_envs, device=env.device) < 0.5
+        kicker = env._soccer_kicker = torch.where(flip, 1.0, -1.0)
+    return kicker
+
+
 def drill_timed_out(env: ManagerBasedRlEnv, seconds: float = DRILL_SECONDS) -> torch.Tensor:
     """A practice situation's clock ran out. A drill is a few seconds of one skill, not a match."""
     return (scenario(env) != KICKOFF) & (env.episode_length_buf >= round(seconds / env.step_dt))
@@ -346,6 +363,10 @@ def _referee(env: ManagerBasedRlEnv) -> MatchStats:
     stats.blue = stats.blue + (stats.blue_scored & kickoff).sum()
     stats.red = stats.red + (stats.red_scored & kickoff).sum()
     stats.draws = stats.draws + (timed_out & ~goal & kickoff).sum()
+    blue_kicked = kickoff_team(env) > 0
+    by_kicker = (stats.blue_scored & blue_kicked) | (stats.red_scored & ~blue_kicked)
+    stats.kicker_goals = stats.kicker_goals + (by_kicker & kickoff).sum()
+    stats.defender_goals = stats.defender_goals + (goal & ~by_kicker & kickoff).sum()
     outcome = torch.stack((stats.blue_scored, stats.red_scored, timed_out & ~goal), -1) & kickoff.unsqueeze(-1)
     by_opp = opponent_kind(env).unsqueeze(-1) == torch.arange(len(OPP_NAMES), device=env.device)
     stats.vs = stats.vs + (by_opp.unsqueeze(-1) & outcome.unsqueeze(1)).sum(0)
@@ -377,7 +398,13 @@ def reset_scenario(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None, probs: 
     drawn = torch.multinomial(weights, len(env_ids), replacement=True)
     kinds[env_ids] = drawn
     env._soccer_touched[env_ids] = False
-    layout = sample_layout(drawn)
+    # Kickoff possession alternates, per env: each kickoff point goes to the other team. Except
+    # against a statue, which is scoring practice: blue always kicks off. Kicking off, a statue
+    # would only stand in front of the ball, right on blue's shooting line.
+    kicker = kickoff_team(env)
+    flipped = torch.where(drawn == KICKOFF, -kicker[env_ids], kicker[env_ids])
+    kicker[env_ids] = torch.where(opponent_kind(env)[env_ids] == OPP_STATUE, torch.ones_like(flipped), flipped)
+    layout = sample_layout(drawn, kicker=kicker[env_ids])
     origin = env.scene.env_origins[env_ids]
     n = len(env_ids)
     zeros6 = torch.zeros(n, 6, device=env.device)
