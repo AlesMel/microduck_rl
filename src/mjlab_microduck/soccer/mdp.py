@@ -42,7 +42,7 @@ OBS_DIM = 27
 # Where the ball must be, in the duck's yaw frame, for a kick to fire: the BallKick policies were
 # trained with the ball at (0.09, -/+0.042) m +-0.015 (`reset_ball_in_front_of_foot`), so this is
 # that placement with some margin. y > 0 is the left foot's side.
-KICK_ZONE_X = (0.05, 0.14)
+KICK_ZONE_X = (0.05, 0.25)  # REACH: far enough out that the routine has room to steer
 KICK_ZONE_Y = 0.08
 KICK_NONE, KICK_LEFT, KICK_RIGHT = 0, 1, 2
 # Which action term drives which team, for the kick state in each side's observation.
@@ -50,12 +50,52 @@ ACTION_TERMS = {1: "blue_walk", -1: "red_walk"}
 
 
 def kick_side(ball_rel_xy: torch.Tensor) -> torch.Tensor:
-    """KICK_LEFT / KICK_RIGHT if the ball (in the duck's yaw frame) is in front of that foot, else
-    KICK_NONE. Shared by the training action term and the duck-sim referee."""
+    """REACH zone: KICK_LEFT / KICK_RIGHT if the ball (in the duck's yaw frame) is near enough in
+    front of that foot to start the stop-then-kick routine, else KICK_NONE. Shared by the training
+    action term and the duck-sim referee."""
     x, y = ball_rel_xy[..., 0], ball_rel_xy[..., 1]
     inside = (x >= KICK_ZONE_X[0]) & (x <= KICK_ZONE_X[1]) & (y.abs() <= KICK_ZONE_Y)
     side = torch.where(y >= 0, torch.full_like(x, KICK_LEFT), torch.full_like(x, KICK_RIGHT))
     return torch.where(inside, side, torch.full_like(x, KICK_NONE)).long()
+
+
+# FIRE band: where a kick from a standing duck actually connects, measured 2026-10-26 by kicking
+# from rest with the ball on a grid. 8-10 cm ahead and 2-6.5 cm toward the kicking foot sends it at
+# 1.0-1.3 m/s within 8-17 degrees of the heading; elsewhere in the REACH zone the kick misses it
+# (0-0.3 m/s) or slices it 30+ degrees. BallKick was trained at (0.09, 0.042) +-0.015.
+FIRE_X = (0.075, 0.105)
+FIRE_Y = (0.015, 0.07)
+
+
+# The stop-then-kick routine's numbers, shared by the training action term and the duck-sim referee
+# (which must not import mjlab). Measured 2026-10-26 on velstand v8 — see `WalkerCommandActionCfg`.
+ROUTINE = {
+    "approach_cmd": 0.25,  # slowest forward command velstand actually walks at (0.08 m/s)
+    "stop_x": 0.105,  # stop with the ball this far ahead: ~1.5 cm of drift lands it mid-FIRE
+    "settle_s": 0.5,
+    "still_speed": 0.03,
+    "foot_y": 0.042,  # steer the ball this far toward the kicking foot
+    "steer_gain": 2.0,
+    "steer_max": 0.5,
+    "timeout_s": 3.0,
+    "kick_s": 0.5,  # the set manifest's duration_s
+}
+
+
+def routine_steer(ball_rel_xy: torch.Tensor, foot: torch.Tensor) -> torch.Tensor:
+    """Yaw command (rad/s) bringing the ball toward `foot`'s side while walking in."""
+    side = torch.where(foot == KICK_RIGHT, -1.0, 1.0)
+    bearing = (ball_rel_xy[..., 1] - side * ROUTINE["foot_y"]) / ball_rel_xy[..., 0].clamp(min=0.08)
+    return (ROUTINE["steer_gain"] * bearing).clamp(-ROUTINE["steer_max"], ROUTINE["steer_max"])
+
+
+def fire_side(ball_rel_xy: torch.Tensor) -> torch.Tensor:
+    """KICK_LEFT / KICK_RIGHT if the ball is in that foot's FIRE band, else KICK_NONE."""
+    x, y = ball_rel_xy[..., 0], ball_rel_xy[..., 1]
+    ahead = (x >= FIRE_X[0]) & (x <= FIRE_X[1])
+    band = (y.abs() >= FIRE_Y[0]) & (y.abs() <= FIRE_Y[1])
+    side = torch.where(y >= 0, torch.full_like(x, KICK_LEFT), torch.full_like(x, KICK_RIGHT))
+    return torch.where(ahead & band, side, torch.full_like(x, KICK_NONE)).long()
 
 
 def _yaw(quat_wxyz: torch.Tensor) -> torch.Tensor:

@@ -28,11 +28,12 @@ import onnxruntime as ort
 import torch
 
 from mjlab_microduck.soccer.frozen_walker import action_to_twist
-from mjlab_microduck.soccer.mdp import KICK_LEFT, KICK_NONE, goal_flags, kick_side, side_obs, to_frame
+from mjlab_microduck.soccer.mdp import (
+    KICK_LEFT, KICK_NONE, ROUTINE, fire_side, goal_flags, kick_side, routine_steer, side_obs, to_frame,
+)
 
 DECISION_DT = 0.1
 RESEND_DT = 0.05
-KICK_S = 0.5  # the set manifest's duration_s for both kicks, as in training
 
 
 class Line:
@@ -64,10 +65,21 @@ class Duck:
         self.line = Line(s)
         self.path = path
         self._id = 0
-        self.kick_until = 0.0
+        # The stop-then-kick routine, as `WalkerCommandAction` runs it in training: walk in
+        # steering the ball to a foot, stop at `stop_x`, settle, then `robot.do` or cancel.
+        self.mode = "walk"  # walk | approach | settle | kick
+        self.foot = KICK_NONE
+        self.until = 0.0  # end of the settle or the kick; the approach's timeout
 
     def kick_fraction(self, now: float) -> float:
-        return max(0.0, self.kick_until - now) / KICK_S
+        """The observation's routine slot: 0 walking, 1 closing in, then 1 -> 0 over settle + kick."""
+        if self.mode == "approach":
+            return 1.0
+        if self.mode == "settle":
+            return (self.until - now + ROUTINE["kick_s"]) / (ROUTINE["settle_s"] + ROUTINE["kick_s"])
+        if self.mode == "kick":
+            return max(0.0, self.until - now) / (ROUTINE["settle_s"] + ROUTINE["kick_s"])
+        return 0.0
 
     def call(self, method: str, params: dict) -> dict:
         self._id += 1
@@ -100,18 +112,43 @@ def observe(world: dict, team: int, time_left: float, own_kick: float) -> torch.
     )
 
 
-def kick(duck: Duck, world: dict, index: int, now: float) -> None:
-    """robotd's own one-shot, if the ball is in front of a foot — the training term's rule."""
+def ball_rel(world: dict, index: int) -> torch.Tensor:
     own = world["ducks"][index]
     t = lambda v: torch.tensor([v], dtype=torch.float32)
-    foot = int(kick_side(to_frame(t(own["pos"]), t(own["quat"]), t(world["ball"]["pos"])))[0])
-    if foot == KICK_NONE:
-        return
-    skill = "kick_left" if foot == KICK_LEFT else "kick_right"
-    answer = duck.call("robot.do", {"skill": skill}).get("result") or {}
-    if answer.get("accepted"):
-        duck.kick_until = now + KICK_S
-        print(f"==   {duck.path.stem} {skill}")
+    return to_frame(t(own["pos"]), t(own["quat"]), t(world["ball"]["pos"]))
+
+
+def routine_step(duck: Duck, world: dict, index: int, now: float) -> np.ndarray | None:
+    """Advance a duck's kick routine; the twist it needs, or None once it is back to walking."""
+    rel = ball_rel(world, index)
+    if duck.mode == "approach":
+        if int(kick_side(rel)[0]) == KICK_NONE or now >= duck.until:
+            duck.mode = "walk"
+            return None
+        if rel[0, 0] <= ROUTINE["stop_x"]:
+            duck.mode, duck.until = "settle", now + ROUTINE["settle_s"]
+            return np.zeros(3)
+        steer = float(routine_steer(rel, torch.tensor([duck.foot]))[0])
+        return np.array([ROUTINE["approach_cmd"], 0.0, steer])
+    if duck.mode == "settle":
+        if now < duck.until:
+            return np.zeros(3)
+        foot = int(fire_side(rel)[0])
+        speed = float(np.linalg.norm(world["ducks"][index]["linvel"][:2]))
+        if foot != KICK_NONE and speed < ROUTINE["still_speed"]:
+            skill = "kick_left" if foot == KICK_LEFT else "kick_right"
+            answer = duck.call("robot.do", {"skill": skill}).get("result") or {}
+            if answer.get("accepted"):
+                duck.mode, duck.until = "kick", now + ROUTINE["kick_s"]
+                print(f"==   {duck.path.stem} {skill}")
+                return np.zeros(3)
+        duck.mode = "walk"
+        return None
+    if duck.mode == "kick":
+        if now < duck.until:
+            return np.zeros(3)
+        duck.mode = "walk"
+    return None
 
 
 def main() -> None:
@@ -150,10 +187,12 @@ def main() -> None:
                 for i, team in enumerate((1, -1)):
                     duck = ducks[i]
                     twist, trigger = policies[i].decide(observe(world, team, time_left, duck.kick_fraction(now)))
-                    if trigger and duck.kick_fraction(now) == 0.0:
-                        kick(duck, world, i, now)
-                    # A kicking duck's twist is not the kick's: robotd runs the skill on its own.
-                    twists.append(np.zeros(3) if duck.kick_fraction(now) > 0 else twist)
+                    foot = int(kick_side(ball_rel(world, i))[0])
+                    if trigger and duck.mode == "walk" and foot != KICK_NONE:
+                        duck.mode, duck.foot, duck.until = "approach", foot, now + ROUTINE["timeout_s"]
+                    # In the routine the twist is the routine's, not the policy's.
+                    routine = routine_step(duck, world, i, now) if duck.mode != "walk" else None
+                    twists.append(twist if routine is None else routine)
                 blue_scored, red_scored = (bool(f) for f in goal_flags(torch.tensor([world["ball"]["pos"]])))
                 if blue_scored or red_scored or time_left == 0.0:
                     points += 1
@@ -172,6 +211,14 @@ def main() -> None:
                     continue
             if now >= next_send:
                 next_send += RESEND_DT
+                # The routine needs the stop timed to the centimetre, so it runs at the resend rate
+                # on a fresh world, not at the policy's 10 Hz.
+                if any(d.mode != "walk" for d in ducks):
+                    world = referee.ask({"op": "world"})
+                    for i, duck in enumerate(ducks):
+                        if duck.mode != "walk":
+                            routine = routine_step(duck, world, i, now)
+                            twists[i] = np.zeros(3) if routine is None else routine
                 for duck, twist in zip(ducks, twists):
                     duck.move(twist)
             time.sleep(max(0.0, min(next_decision, next_send) - time.monotonic()))

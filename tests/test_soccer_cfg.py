@@ -167,6 +167,32 @@ def test_kick_zone():
     assert kick_side(balls).tolist() == [KICK_LEFT, KICK_RIGHT, KICK_NONE, KICK_NONE, KICK_NONE]
 
 
+def test_fire_band_is_where_kicks_connect():
+    """FIRE is the measured band (8-10 cm ahead, 2-6.5 cm toward a foot); centred or far balls are
+    dud kicks and must not fire."""
+    from mjlab_microduck.soccer.mdp import KICK_LEFT, KICK_NONE, KICK_RIGHT, fire_side
+
+    balls = torch.tensor([
+        [0.09, 0.042],  # BallKick's left placement
+        [0.09, -0.042],  # and the right
+        [0.09, 0.0],  # dead centre: 0.2-0.6 m/s at 32-39 degrees off
+        [0.12, 0.042],  # too far ahead: 0.3 m/s
+        [0.06, 0.042],  # too close: 0.1 m/s
+        [0.09, 0.08],  # too wide: 30 degrees off
+    ])
+    assert fire_side(balls).tolist() == [KICK_LEFT, KICK_RIGHT, KICK_NONE, KICK_NONE, KICK_NONE, KICK_NONE]
+
+
+def test_routine_steers_the_ball_toward_the_foot():
+    """Ball dead ahead, left foot chosen: turn right (negative yaw rate) so it ends up on the left."""
+    from mjlab_microduck.soccer.mdp import KICK_LEFT, KICK_RIGHT, routine_steer
+
+    ahead = torch.tensor([[0.15, 0.0], [0.15, 0.0], [0.15, 0.042]])
+    feet = torch.tensor([KICK_LEFT, KICK_RIGHT, KICK_LEFT])
+    steer = routine_steer(ahead, feet)
+    assert steer[0] < 0 < steer[1] and abs(steer[2]) < 1e-6
+
+
 def test_ball_out():
     inside = torch.tensor([[0.0, 0.0, 0.035], [FIELD.half_length + 0.1, 0.0, 0.035]])
     outside = torch.tensor([[0.0, FIELD.half_width + 0.3, 0.1], [0.0, 0.0, -1.0]])
