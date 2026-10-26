@@ -12,6 +12,7 @@ ball that cannot leave the pitch removes throw-ins from the problem.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,7 @@ class Field:
     goal_depth: float = 0.2  # behind the goal line (x)
     post_radius: float = 0.015
     line_width: float = 0.02
+    corner_cut: float = 0.15  # each corner cut off at 45°, this far along both walls
 
     @property
     def half_length(self) -> float:
@@ -54,11 +56,12 @@ _LINE_RGBA = (1.0, 1.0, 1.0, 1.0)
 _GOAL_RGBA = {-1: (0.2, 0.4, 1.0, 1.0), +1: (1.0, 0.25, 0.2, 1.0)}
 
 
-def _box(body: mujoco.MjsBody, name: str, center, half_size, rgba, collide: bool = True) -> None:
+def _box(body: mujoco.MjsBody, name: str, center, half_size, rgba, collide: bool = True, yaw: float = 0.0) -> None:
     body.add_geom(
         name=name,
         type=mujoco.mjtGeom.mjGEOM_BOX,
         pos=list(center),
+        quat=[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)],
         size=list(half_size),
         rgba=list(rgba),
         contype=1 if collide else 0,
@@ -96,6 +99,19 @@ def add_field(spec: mujoco.MjSpec, field: Field = FIELD) -> None:
         _box(wb, f"goal_{tag}_net_top", (x_box, 0, gh + r), (gd / 2, gw + 2 * r, r / 2), _NET_RGBA)
         # Goal line, drawn only: the referee decides a goal from the ball's position, not a contact.
         _box(wb, f"line_goal_{tag}", (end * hl, 0, 0.001), (field.line_width / 2, hw, 0.001), _LINE_RGBA, collide=False)
+
+    # Corners cut at 45°: a ball run along a wall into a square corner stays there, and the drive run
+    # had it within 20 cm of a touchline 41% of the time. A diagonal sends it back toward the middle.
+    c = field.corner_cut
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            # Inner face on the line between (sx(hl - c), sy hw) and (sx hl, sy(hw - c)); the box sits
+            # just outside it, its long side along that line and long enough to reach into both walls.
+            out = t / 2 / math.sqrt(2)
+            center = (sx * (hl - c / 2 + out), sy * (hw - c / 2 + out), h / 2)
+            half = (c / math.sqrt(2) + t, t / 2, h / 2)
+            tag = f"{'red' if sx > 0 else 'blue'}_{'left' if sy > 0 else 'right'}"
+            _box(wb, f"corner_{tag}", center, half, _WALL_RGBA, yaw=math.atan2(-sy, sx))
 
     _box(wb, "line_half", (0, 0, 0.001), (field.line_width / 2, hw, 0.001), _LINE_RGBA, collide=False)
 

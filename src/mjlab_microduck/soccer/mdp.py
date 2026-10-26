@@ -293,7 +293,9 @@ def approach_facing(env: ManagerBasedRlEnv, asset_name: str = BLUE, max_speed: f
     return closing.clamp(0.0, max_speed) * facing
 
 
-def drive_through(env: ManagerBasedRlEnv, asset_name: str = BLUE, team: int = 1, max_speed: float = 0.4) -> torch.Tensor:
+def drive_through(
+    env: ManagerBasedRlEnv, asset_name: str = BLUE, team: int = 1, max_speed: float = 0.4, near: float = 0.25
+) -> torch.Tensor:
     """The duck's velocity toward the goal it attacks (m/s, >= 0, clamped), scaled by how squarely it
     stands behind the ball on that line: duck -> ball -> goal. Running through the ball at goal pays;
     standing still, standing beside the ball, or between the ball and the goal pays nothing.
@@ -302,13 +304,17 @@ def drive_through(env: ManagerBasedRlEnv, asset_name: str = BLUE, team: int = 1,
     collected without bringing the ball along. It replaces a reward for firing a kick aimed at goal,
     which the aim run (2026-10-26) farmed: both ducks within 20 cm of the ball 88% of the time,
     kicking it into each other nonstop — 832 kicks in 16 matches and the ball never moved.
+
+    Only within `near` of the ball, which is dribbling range: without it the drive run collected it
+    from a median 0.39 m behind the ball, a third of the time from beyond 0.5 m, never touching it.
     """
     ball_xy = _local(env, BALL)[:, :2]
     duck_xy = _local(env, asset_name)[:, :2]
     to_goal = _unit(ball_xy.new_tensor((team * FIELD.half_length, 0.0)) - ball_xy)
     behind = (_unit(ball_xy - duck_xy) * to_goal).sum(-1)
     goalward = (env.scene[asset_name].data.root_link_lin_vel_w[:, :2] * to_goal).sum(-1)
-    return goalward.clamp(0.0, max_speed) * behind.clamp(0.0, 1.0)
+    close = ((ball_xy - duck_xy).norm(dim=-1) <= near).float()
+    return goalward.clamp(0.0, max_speed) * behind.clamp(0.0, 1.0) * close
 
 
 def fallen(env: ManagerBasedRlEnv, asset_name: str = BLUE) -> torch.Tensor:

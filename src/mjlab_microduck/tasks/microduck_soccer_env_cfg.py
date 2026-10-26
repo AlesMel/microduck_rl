@@ -7,10 +7,11 @@ snapshot of the learner, swapped in by `SelfPlayRunner` — until the first one 
 stands there.
 
 One episode is one point, like Unity's soccer: it ends on a goal, on the clock (a draw), or if the
-ball escapes the pitch. Reward is Unity's: +1 for a goal, -1 for conceding, and an existential
+ball escapes the pitch. Reward is Unity's shape: +5 for a goal, -5 for conceding, and an existential
 penalty summing to -1 over a full match so that a draw is worth less than a win. Shaping terms
-(close on the ball, move the ball toward the goal) bootstrap the first few hundred iterations and
-are annealed to zero — a policy still paid for chasing the ball would chase rather than score.
+(close on the ball, drive it at goal) bootstrap the first iterations and are annealed — to zero,
+except the ball's own speed toward goal, which keeps a quarter — so that a policy is not paid more
+for chasing the ball than for scoring.
 
 Rewards are multiplied by step_dt (0.1 s) in mjlab, so an event that should be worth 1 has weight
 1 / step_dt.
@@ -58,7 +59,9 @@ TRUNK_Z = 0.125  # velstand's reset height
 KICKOFF_NOISE = {"x": (-0.15, 0.15), "y": (-0.3, 0.3), "yaw": (-0.35, 0.35)}
 BALL_NOISE = {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}
 
-GOAL_WEIGHT = 1.0 / DECISION_DT
+# A goal is worth 5 (an event on one step, so the weight carries 1 / step_dt). At 1 it was 0.08 per
+# point in practice against ~2-4 of shaping, and the drive run optimised the shaping instead.
+GOAL_WEIGHT = 5.0 / DECISION_DT
 APPROACH_WEIGHT = 0.5
 # The ball's speed toward the goal blue attacks: the one shaping term that measures an outcome, so
 # it cannot be collected without the ball moving. Three runs annealed every term to zero and each
@@ -238,8 +241,9 @@ MicroduckSoccerRlCfg = RslRlOnPolicyRunnerCfg(
         use_clipped_value_loss=True,
         clip_param=0.2,
         # Low: the actions are clipped to [-1, 1], so a wider Gaussian costs the policy nothing it can
-        # see, and at 0.005 the aim run's std climbed to 2.9 — random play — by iteration 400.
-        entropy_coef=0.001,
+        # see, and at 0.005 the aim run's std climbed to 2.9 — random play — by iteration 400. At 0.001
+        # the drive run's collapsed to 0.07 by iteration 1300 and it stopped exploring.
+        entropy_coef=0.002,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
