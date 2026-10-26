@@ -71,6 +71,7 @@ def _state(n=5, seed=0):
         a_pos=rnd(n, 3), a_quat=quat(yaw), a_vel=rnd(n, 3), a_rate=rnd(n), a_gz=-torch.rand(n, generator=g),
         b_pos=rnd(n, 3), b_quat=quat(yaw.flip(0)), b_vel=rnd(n, 3), b_rate=rnd(n), b_gz=-torch.rand(n, generator=g),
         ball_pos=rnd(n, 3), ball_vel=rnd(n, 3), t=torch.rand(n, generator=g),
+        a_kick=torch.rand(n, generator=g), b_kick=torch.rand(n, generator=g),
     )
 
 
@@ -90,7 +91,7 @@ def _obs(s, team, own="a"):
     opp = "b" if own == "a" else "a"
     return side_obs(s[f"{own}_pos"], s[f"{own}_quat"], s[f"{own}_vel"], s[f"{own}_rate"], s[f"{own}_gz"],
                     s[f"{opp}_pos"], s[f"{opp}_quat"], s[f"{opp}_vel"], s[f"{opp}_gz"],
-                    s["ball_pos"], s["ball_vel"], s["t"], team)
+                    s["ball_pos"], s["ball_vel"], s["t"], s[f"{own}_kick"], team)
 
 
 def test_mirroring_makes_one_policy_play_both_ends():
@@ -130,6 +131,20 @@ def test_twist_mapping_caps_reverse():
     np.testing.assert_allclose(action_to_twist(actions.numpy()), expected.numpy(), atol=1e-6)
     # Never beyond what velstand was trained on.
     assert (action_to_twist(actions).abs() <= torch.tensor(TWIST_LIMITS)).all()
+
+
+def test_kick_zone():
+    """A kick fires only with the ball where BallKick trained it: just ahead of a foot."""
+    from mjlab_microduck.soccer.mdp import KICK_LEFT, KICK_NONE, KICK_RIGHT, kick_side
+
+    balls = torch.tensor([
+        [0.09, 0.042],  # BallKick's left-foot placement
+        [0.09, -0.042],  # and the right
+        [0.30, 0.0],  # too far ahead
+        [-0.09, 0.04],  # behind the duck
+        [0.09, 0.2],  # off to the side
+    ])
+    assert kick_side(balls).tolist() == [KICK_LEFT, KICK_RIGHT, KICK_NONE, KICK_NONE, KICK_NONE]
 
 
 def test_ball_out():

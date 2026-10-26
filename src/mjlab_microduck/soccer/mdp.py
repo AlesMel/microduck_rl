@@ -32,7 +32,25 @@ BALL_RADIUS = 0.035
 # A duck lying on its side reads gravity z ~ 0; upright is -1. Past 60° it is not playing.
 FALLEN_GRAVITY_Z = -0.5
 
-OBS_DIM = 26
+OBS_DIM = 27
+
+# Where the ball must be, in the duck's yaw frame, for a kick to fire: the BallKick policies were
+# trained with the ball at (0.09, -/+0.042) m +-0.015 (`reset_ball_in_front_of_foot`), so this is
+# that placement with some margin. y > 0 is the left foot's side.
+KICK_ZONE_X = (0.05, 0.14)
+KICK_ZONE_Y = 0.08
+KICK_NONE, KICK_LEFT, KICK_RIGHT = 0, 1, 2
+# Which action term drives which team, for the kick state in each side's observation.
+ACTION_TERMS = {1: "blue_walk", -1: "red_walk"}
+
+
+def kick_side(ball_rel_xy: torch.Tensor) -> torch.Tensor:
+    """KICK_LEFT / KICK_RIGHT if the ball (in the duck's yaw frame) is in front of that foot, else
+    KICK_NONE. Shared by the training action term and the duck-sim referee."""
+    x, y = ball_rel_xy[..., 0], ball_rel_xy[..., 1]
+    inside = (x >= KICK_ZONE_X[0]) & (x <= KICK_ZONE_X[1]) & (y.abs() <= KICK_ZONE_Y)
+    side = torch.where(y >= 0, torch.full_like(x, KICK_LEFT), torch.full_like(x, KICK_RIGHT))
+    return torch.where(inside, side, torch.full_like(x, KICK_NONE)).long()
 
 
 def _yaw(quat_wxyz: torch.Tensor) -> torch.Tensor:
@@ -60,9 +78,13 @@ def side_obs(
     ball_pos: torch.Tensor,
     ball_vel: torch.Tensor,
     time_left: torch.Tensor,
+    own_kick: torch.Tensor,
     team: int,
 ) -> torch.Tensor:
-    """The match as one duck sees it, 26 values. Positions are env-local (origin = centre spot).
+    """The match as one duck sees it, 27 values. Positions are env-local (origin = centre spot).
+
+    `own_kick` is the fraction of a running kick still to go (0 when walking): while it is
+    non-zero the duck's twist is ignored, and the value function needs to know that.
 
     `team` is +1 for blue and -1 for red: red's world is turned 180° first, so both see their own
     goal at -x. Shared with the duck-sim referee, which is why it takes tensors and not an env.
@@ -97,9 +119,20 @@ def side_obs(
             own_gravity_z.unsqueeze(-1),  # 1: am I up
             opp_gravity_z.unsqueeze(-1),  # 1: is the opponent up
             time_left.unsqueeze(-1),  # 1: fraction of the match left
+            own_kick.unsqueeze(-1),  # 1: fraction of my kick still running
         ),
         dim=-1,
     )
+
+
+def to_frame(own_pos: torch.Tensor, own_quat: torch.Tensor, point: torch.Tensor) -> torch.Tensor:
+    """`point`'s planar position in the yaw frame of a body at `own_pos` / `own_quat`."""
+    return _rotate((point - own_pos)[..., :2], _yaw(own_quat))
+
+
+def ball_in_frame(env: ManagerBasedRlEnv, asset_name: str) -> torch.Tensor:
+    """The ball's planar position in `asset_name`'s yaw frame."""
+    return to_frame(_local(env, asset_name), env.scene[asset_name].data.root_link_quat_w, _local(env, BALL))
 
 
 def _local(env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
@@ -124,6 +157,7 @@ def match_obs(env: ManagerBasedRlEnv, team: int) -> torch.Tensor:
         _local(env, BALL),
         ball_d.root_link_lin_vel_w,
         time_left,
+        env.action_manager.get_term(ACTION_TERMS[team]).kick_fraction,
         team,
     )
 

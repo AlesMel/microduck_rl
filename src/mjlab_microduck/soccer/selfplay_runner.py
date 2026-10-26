@@ -35,6 +35,7 @@ PLAY_LATEST = 0.5
 ELO_K = 16.0
 ELO_START = 1200.0
 OPPONENT_TERM = "red_walk"
+LEARNER_TERM = "blue_walk"
 POOL_FILE = "selfplay_pool.pt"
 
 
@@ -70,6 +71,9 @@ class SelfPlayRunner(MjlabOnPolicyRunner):
     def _after_update(self) -> None:
         self._updates += 1
         it = self.current_learning_iteration + 1
+        learner = self.env.unwrapped.action_manager.get_term(LEARNER_TERM)
+        self._log(it, kicks_per_env=float(learner.kicks_fired) / self.env.num_envs)
+        learner.kicks_fired.zero_()
         blue, red, draws = match_stats(self.env.unwrapped).take()
         points = blue + red + draws
         if points > 0:

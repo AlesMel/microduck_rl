@@ -28,10 +28,11 @@ import onnxruntime as ort
 import torch
 
 from mjlab_microduck.soccer.frozen_walker import action_to_twist
-from mjlab_microduck.soccer.mdp import goal_flags, side_obs
+from mjlab_microduck.soccer.mdp import KICK_LEFT, KICK_NONE, goal_flags, kick_side, side_obs, to_frame
 
 DECISION_DT = 0.1
 RESEND_DT = 0.05
+KICK_S = 0.5  # the set manifest's duration_s for both kicks, as in training
 
 
 class Line:
@@ -63,6 +64,10 @@ class Duck:
         self.line = Line(s)
         self.path = path
         self._id = 0
+        self.kick_until = 0.0
+
+    def kick_fraction(self, now: float) -> float:
+        return max(0.0, self.kick_until - now) / KICK_S
 
     def call(self, method: str, params: dict) -> dict:
         self._id += 1
@@ -78,20 +83,35 @@ class Policy:
         self.session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
         self.input = self.session.get_inputs()[0].name
 
-    def twist(self, obs: torch.Tensor) -> np.ndarray:
+    def decide(self, obs: torch.Tensor) -> tuple[np.ndarray, bool]:
+        """(twist, kick trigger), the same split `WalkerCommandAction` makes in training."""
         action = self.session.run(None, {self.input: obs.numpy().astype(np.float32)})[0][0]
-        return action_to_twist(action)
+        return action_to_twist(action[:3]), bool(action[3] > 0)
 
 
-def observe(world: dict, team: int, time_left: float) -> torch.Tensor:
+def observe(world: dict, team: int, time_left: float, own_kick: float) -> torch.Tensor:
     """`side_obs` from the referee port's numbers; duck a is blue, duck b is red."""
     own, opp = (world["ducks"][0], world["ducks"][1]) if team > 0 else (world["ducks"][1], world["ducks"][0])
     t = lambda v: torch.tensor([v], dtype=torch.float32)
     return side_obs(
         t(own["pos"]), t(own["quat"]), t(own["linvel"]), t(own["angvel"][2]), t(own["gravity_z"]),
         t(opp["pos"]), t(opp["quat"]), t(opp["linvel"]), t(opp["gravity_z"]),
-        t(world["ball"]["pos"]), t(world["ball"]["vel"]), t(time_left), team,
+        t(world["ball"]["pos"]), t(world["ball"]["vel"]), t(time_left), t(own_kick), team,
     )
+
+
+def kick(duck: Duck, world: dict, index: int, now: float) -> None:
+    """robotd's own one-shot, if the ball is in front of a foot — the training term's rule."""
+    own = world["ducks"][index]
+    t = lambda v: torch.tensor([v], dtype=torch.float32)
+    foot = int(kick_side(to_frame(t(own["pos"]), t(own["quat"]), t(world["ball"]["pos"])))[0])
+    if foot == KICK_NONE:
+        return
+    skill = "kick_left" if foot == KICK_LEFT else "kick_right"
+    answer = duck.call("robot.do", {"skill": skill}).get("result") or {}
+    if answer.get("accepted"):
+        duck.kick_until = now + KICK_S
+        print(f"==   {duck.path.stem} {skill}")
 
 
 def main() -> None:
@@ -126,7 +146,14 @@ def main() -> None:
                 world = referee.ask({"op": "world"})
                 elapsed = now - started
                 time_left = max(0.0, 1.0 - elapsed / args.match_seconds)
-                twists = [policies[i].twist(observe(world, team, time_left)) for i, team in enumerate((1, -1))]
+                twists = []
+                for i, team in enumerate((1, -1)):
+                    duck = ducks[i]
+                    twist, trigger = policies[i].decide(observe(world, team, time_left, duck.kick_fraction(now)))
+                    if trigger and duck.kick_fraction(now) == 0.0:
+                        kick(duck, world, i, now)
+                    # A kicking duck's twist is not the kick's: robotd runs the skill on its own.
+                    twists.append(np.zeros(3) if duck.kick_fraction(now) > 0 else twist)
                 blue_scored, red_scored = (bool(f) for f in goal_flags(torch.tensor([world["ball"]["pos"]])))
                 if blue_scored or red_scored or time_left == 0.0:
                     points += 1

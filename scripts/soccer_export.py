@@ -45,7 +45,7 @@ def main() -> None:
     for key, value in {
         "task": TASK,
         "obs_dim": str(OBS_DIM),
-        "action": "[-1, 1]^3 -> vx, vy, yaw rate: a * upper for a >= 0, a * -lower for a < 0",
+        "action": "[-1, 1]^4: vx, vy, yaw rate (a * upper for a >= 0, a * -lower below 0), kick trigger (> 0)",
         "twist_lower": ",".join(str(v) for v in TWIST_LOWER),
         "twist_upper": ",".join(str(v) for v in TWIST_UPPER),
         "checkpoint": str(args.checkpoint),
