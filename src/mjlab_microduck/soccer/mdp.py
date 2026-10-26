@@ -79,6 +79,11 @@ ROUTINE = {
     "steer_max": 0.5,
     "timeout_s": 3.0,
     "kick_s": 0.5,  # the set manifest's duration_s
+    # An opponent trunk this near the ball calls the routine off (or never starts it): two ducks
+    # that both stop to kick a ball between them freeze there, 86% of oracle-vs-oracle points
+    # ended drawn. Contested balls are dribbled: walked through at full speed, which scores 62%
+    # of 0.7 m shots in ~3.7 s.
+    "contest_dist": 0.25,
 }
 
 
@@ -87,6 +92,11 @@ def routine_steer(ball_rel_xy: torch.Tensor, foot: torch.Tensor) -> torch.Tensor
     side = torch.where(foot == KICK_RIGHT, -1.0, 1.0)
     bearing = (ball_rel_xy[..., 1] - side * ROUTINE["foot_y"]) / ball_rel_xy[..., 0].clamp(min=0.08)
     return (ROUTINE["steer_gain"] * bearing).clamp(-ROUTINE["steer_max"], ROUTINE["steer_max"])
+
+
+def contested(ball_xy: torch.Tensor, opponent_xy: torch.Tensor) -> torch.Tensor:
+    """True where the opponent is close enough to the ball that stopping to kick it would freeze."""
+    return (opponent_xy - ball_xy).norm(dim=-1) < ROUTINE["contest_dist"]
 
 
 def fire_side(ball_rel_xy: torch.Tensor) -> torch.Tensor:

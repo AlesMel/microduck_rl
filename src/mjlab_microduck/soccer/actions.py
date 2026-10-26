@@ -13,7 +13,9 @@ that foot's FIRE band — where a kick from rest was measured to connect — the
 `ball_kick_left/right.onnx` runs for its manifest window (0.5 s), fed the all-zero command it was
 trained on, and hands back to the walker. Otherwise the routine cancels and the duck walks on. This
 is how `robot.do kick_left` is used on a robot too: you stop the duck before you ask it to kick.
-A trigger with the ball out of reach, or mid-routine, does nothing.
+A trigger with the ball out of reach, or mid-routine, does nothing. Neither does one with the
+opponent at the ball (`contested`): stopping there only freezes both ducks, so the routine is
+called off (or never starts) and the duck has to dribble — walk the ball forward — instead.
 
 With `source="opponent"` the term takes no slice of the policy's action. Each step it reads the
 `opponent` observation group — red's view, laid out exactly like the learner's — and asks the
@@ -31,7 +33,9 @@ import torch
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 
 from mjlab_microduck.soccer.frozen_walker import FrozenMlp, action_to_twist, walker_path
-from mjlab_microduck.soccer.mdp import ROUTINE, KICK_LEFT, KICK_NONE, KICK_RIGHT, ball_in_frame, fire_side, kick_side, routine_steer
+from mjlab_microduck.soccer.mdp import (
+    BALL, ROUTINE, KICK_LEFT, KICK_NONE, KICK_RIGHT, ball_in_frame, contested, fire_side, kick_side, routine_steer,
+)
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -57,6 +61,7 @@ class WalkerCommandActionCfg(JointPositionActionCfg):
     scale: float = 1.0  # velstand's action scale (the kicks share it)
     use_default_offset: bool = True
     source: str = "policy"  # "policy": a slice of the action; "opponent": the self-play snapshot
+    opponent_name: str | None = None  # the other duck: near the ball, it calls the routine off
     opponent_obs_group: str = "opponent"
     walker_file: str | None = None  # default: velstand.onnx from the pinned Hub set
     walker_period_s: float = 0.02  # 50 Hz, the rate velstand was trained at
@@ -119,6 +124,7 @@ class WalkerCommandAction(JointPositionAction):
 
         self.kicks_fired = torch.zeros((), device=self.device)  # since the runner last read it
         self.kicks_cancelled = torch.zeros((), device=self.device)  # settled, but no kickable ball
+        self.kicks_contested = torch.zeros((), device=self.device)  # of those: called off, opponent at the ball
         self.fired_now = torch.zeros(n, dtype=torch.bool, device=self.device)  # this decision's kicks
         # Set by the self-play runner: (N, obs) -> (N, 4) in [-1, 1], or None for a standing opponent.
         self.opponent_policy: Callable[[torch.Tensor], torch.Tensor] | None = None
@@ -159,6 +165,12 @@ class WalkerCommandAction(JointPositionAction):
         rest = (self._settle_left + self._kick_left).float() / (self._settle_ticks + self._kick_ticks)
         return torch.where(self.aligning, torch.ones_like(rest), rest)
 
+    def _contested(self) -> torch.Tensor:
+        if self.cfg.opponent_name is None:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        scene = self._env.scene
+        return contested(scene[BALL].data.root_link_pos_w[:, :2], scene[self.cfg.opponent_name].data.root_link_pos_w[:, :2])
+
     def process_actions(self, actions: torch.Tensor) -> None:
         if self.cfg.source == "policy":
             self._hl_action[:] = actions
@@ -173,7 +185,7 @@ class WalkerCommandAction(JointPositionAction):
         # A trigger with the ball within reach starts the routine: place the ball on the foot on its
         # side (`_align_step`), stop and settle, then kick or cancel (`_end_settle`).
         foot = kick_side(ball_in_frame(self._env, self.cfg.entity_name))
-        start = (decision[:, 3] > 0) & ~self.busy & (foot != KICK_NONE)
+        start = (decision[:, 3] > 0) & ~self.busy & (foot != KICK_NONE) & ~self._contested()
         # In place, never rebound: these buffers were made outside the rollout's inference_mode,
         # and a tensor rebound inside it could not be reset in place outside it afterwards.
         self._align_left[:] = torch.where(start, torch.full_like(self._align_left, self._align_ticks), self._align_left)
@@ -181,6 +193,15 @@ class WalkerCommandAction(JointPositionAction):
         self.fired_now[:] = False
         # A new decision starts a walker tick, so the twist lands without a 20 ms wait.
         self._substep = 0
+
+    def _call_off_contested(self) -> None:
+        """Each walker tick: the opponent reached the ball, so stop closing in or settling. The
+        kick itself, once running, finishes."""
+        off = ((self._align_left > 0) | (self._settle_left > 0)) & self._contested()
+        self.kicks_cancelled += off.sum()
+        self.kicks_contested += off.sum()
+        self._align_left[:] = torch.where(off, torch.zeros_like(self._align_left), self._align_left)
+        self._settle_left[:] = torch.where(off, torch.zeros_like(self._settle_left), self._settle_left)
 
     def _align_step(self) -> None:
         """Each walker tick while closing in: walk at `approach_cmd`, steering the ball toward the
@@ -234,6 +255,7 @@ class WalkerCommandAction(JointPositionAction):
 
     def apply_actions(self) -> None:
         if self._substep % self._period == 0:
+            self._call_off_contested()
             self._align_step()
             self._end_settle()
             obs = self._policy_obs()

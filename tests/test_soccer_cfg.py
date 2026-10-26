@@ -31,6 +31,7 @@ def test_entities_and_actions(cfg):
     assert set(cfg.scene.entities) == {"robot_blue", "robot_red", "ball"}
     assert cfg.actions["blue_walk"].entity_name == "robot_blue" and cfg.actions["blue_walk"].source == "policy"
     assert cfg.actions["red_walk"].entity_name == "robot_red" and cfg.actions["red_walk"].source == "opponent"
+    assert cfg.actions["blue_walk"].opponent_name == "robot_red" and cfg.actions["red_walk"].opponent_name == "robot_blue"
     # The walker runs at the rate it was trained at, under a 10 Hz decision.
     assert math.isclose(cfg.sim.mujoco.timestep * cfg.decimation, DECISION_DT)
     # World geometry sits at every world's origin, so the entities must too.
@@ -203,6 +204,15 @@ def test_routine_steers_the_ball_toward_the_foot():
     feet = torch.tensor([KICK_LEFT, KICK_RIGHT, KICK_LEFT])
     steer = routine_steer(ahead, feet)
     assert steer[0] < 0 < steer[1] and abs(steer[2]) < 1e-6
+
+
+def test_contested_ball_calls_off_the_kick():
+    """An opponent within `contest_dist` of the ball means dribble, not stop-then-kick."""
+    from mjlab_microduck.soccer.mdp import ROUTINE, contested
+
+    ball = torch.tensor([[0.0, 0.0], [0.0, 0.0], [1.0, 0.5]])
+    opp = torch.tensor([[0.15, 0.0], [ROUTINE["contest_dist"] + 0.05, 0.0], [1.0, 0.3]])
+    assert contested(ball, opp).tolist() == [True, False, True]
 
 
 def test_ball_out():

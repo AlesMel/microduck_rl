@@ -123,9 +123,11 @@ class SelfPlayRunner(MjlabOnPolicyRunner):
         unwrapped = self.env.unwrapped
         learner = unwrapped.action_manager.get_term(LEARNER_TERM)
         self._log(it, kicks_per_env=float(learner.kicks_fired) / self.env.num_envs,
-                  kicks_cancelled_per_env=float(learner.kicks_cancelled) / self.env.num_envs)
+                  kicks_cancelled_per_env=float(learner.kicks_cancelled) / self.env.num_envs,
+                  kicks_contested_per_env=float(learner.kicks_contested) / self.env.num_envs)
         learner.kicks_fired.zero_()
         learner.kicks_cancelled.zero_()
+        learner.kicks_contested.zero_()
         stats = match_stats(unwrapped)
         # Per practice situation and per opponent kind, before `take` clears the counts.
         self._log(it, prefix="Scenario", **stats.take_scenarios())

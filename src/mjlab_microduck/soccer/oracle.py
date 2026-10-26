@@ -12,6 +12,9 @@ all measured 2026-10-26:
   face the goal, and triggers.
 
 Attack: go round the ball to the spot behind it on the ball -> goal line, face the goal, trigger.
+Dribble: with the opponent at the ball (`contested`) the routine won't run, so from anywhere
+behind the ball the oracle walks it toward the goal at full speed instead — which also makes it
+the tackle: the defender is goal-side, so it pushes the ball away from its own goal.
 Defend: when the opponent is nearer the ball and the ball is in the oracle's own half, stand
 between the ball and its own goal, facing the ball.
 """
@@ -24,7 +27,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab_microduck.soccer.field import FIELD
-from mjlab_microduck.soccer.mdp import BALL, KICK_NONE, _local, _unit, _yaw, ball_in_frame, kick_side
+from mjlab_microduck.soccer.mdp import BALL, KICK_NONE, _local, _unit, _yaw, ball_in_frame, contested, kick_side
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -36,6 +39,9 @@ ARRIVE = 0.06  # close enough to a target point to stop walking
 TURN_IN_PLACE = 0.6  # rad of heading error above which the oracle stops and turns
 AIM_TOL = 0.12  # rad: aimed well enough to trigger
 GUARD_DIST = 0.35  # defending: this far from the ball toward its own goal
+DRIBBLE_BEHIND = 0.05  # dribbling: walk at a point this far behind the ball on its push line
+ESCAPE_ANGLE = 0.9  # rad: with the opponent in front of the ball, push it this far round them
+BLOCK_WIDTH = 0.2  # opponent within this of the ball -> goal line counts as in front of the ball
 
 
 def _wrap(a: torch.Tensor) -> torch.Tensor:
@@ -91,9 +97,22 @@ class Oracle:
         guard = ball + _unit(own_goal - ball) * GUARD_DIST
         target = torch.where(defend.unsqueeze(-1), guard, attack_target)
 
+        # Dribble a contested ball from any side behind it: no stop, no kick, just push. With the
+        # opponent in front of the ball, pushing at the goal pins it between the two ducks, so push
+        # it diagonally round the opponent's side away from them.
+        dribble = contested(ball, opp) & ((rel * aim).sum(-1) < 0)
+        defend = defend & ~dribble
+        opp_rel = opp - ball
+        lateral = (opp_rel * perp).sum(-1)
+        blocked = ((opp_rel * aim).sum(-1) > 0) & (lateral.abs() < BLOCK_WIDTH)
+        away = torch.where(lateral > 0, -1.0, 1.0) * ESCAPE_ANGLE * blocked
+        c, s_ = torch.cos(away).unsqueeze(-1), torch.sin(away).unsqueeze(-1)
+        push = torch.cat((aim[:, :1] * c - aim[:, 1:] * s_, aim[:, :1] * s_ + aim[:, 1:] * c), -1)
+        target = torch.where(dribble.unsqueeze(-1), ball - push * DRIBBLE_BEHIND, target)
+
         to_t = target - pos
         dist = to_t.norm(dim=-1)
-        arrived = dist < ARRIVE
+        arrived = (dist < ARRIVE) & ~dribble  # a dribble walks on through its target
         # Heading to walk on, or once arrived the heading to hold: the goal when attacking, the
         # ball when guarding.
         face = torch.where(defend, torch.atan2(-rel[:, 1], -rel[:, 0]), torch.atan2(aim[:, 1], aim[:, 0]))
@@ -110,7 +129,7 @@ class Oracle:
         # roughly faces the goal; the routine walks the last centimetres.
         aim_err = _wrap(torch.atan2(aim[:, 1], aim[:, 0]) - yaw).abs()
         in_reach = kick_side(ball_in_frame(env, self.me)) != KICK_NONE
-        ready = (~defend & behind & arrived & (aim_err < AIM_TOL)) | (in_reach & (aim_err < 2 * AIM_TOL))
+        ready = ((~defend & behind & arrived & (aim_err < AIM_TOL)) | (in_reach & (aim_err < 2 * AIM_TOL))) & ~dribble
         kick = torch.where(ready, torch.ones_like(err), -torch.ones_like(err))
         return torch.stack((vx, torch.zeros_like(vx), yaw_cmd, kick), -1)
 

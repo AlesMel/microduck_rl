@@ -29,7 +29,7 @@ import torch
 
 from mjlab_microduck.soccer.frozen_walker import action_to_twist
 from mjlab_microduck.soccer.mdp import (
-    KICK_LEFT, KICK_NONE, ROUTINE, fire_side, goal_flags, kick_side, routine_steer, side_obs, to_frame,
+    KICK_LEFT, KICK_NONE, ROUTINE, contested, fire_side, goal_flags, kick_side, routine_steer, side_obs, to_frame,
 )
 
 DECISION_DT = 0.1
@@ -118,9 +118,18 @@ def ball_rel(world: dict, index: int) -> torch.Tensor:
     return to_frame(t(own["pos"]), t(own["quat"]), t(world["ball"]["pos"]))
 
 
+def ball_contested(world: dict, index: int) -> bool:
+    """The other duck is at the ball: no stop-then-kick, as in training (`WalkerCommandAction`)."""
+    t = lambda v: torch.tensor([v[:2]], dtype=torch.float32)
+    return bool(contested(t(world["ball"]["pos"]), t(world["ducks"][1 - index]["pos"]))[0])
+
+
 def routine_step(duck: Duck, world: dict, index: int, now: float) -> np.ndarray | None:
     """Advance a duck's kick routine; the twist it needs, or None once it is back to walking."""
     rel = ball_rel(world, index)
+    if duck.mode in ("approach", "settle") and ball_contested(world, index):
+        duck.mode = "walk"
+        return None
     if duck.mode == "approach":
         if int(kick_side(rel)[0]) == KICK_NONE or now >= duck.until:
             duck.mode = "walk"
@@ -188,7 +197,7 @@ def main() -> None:
                     duck = ducks[i]
                     twist, trigger = policies[i].decide(observe(world, team, time_left, duck.kick_fraction(now)))
                     foot = int(kick_side(ball_rel(world, i))[0])
-                    if trigger and duck.mode == "walk" and foot != KICK_NONE:
+                    if trigger and duck.mode == "walk" and foot != KICK_NONE and not ball_contested(world, i):
                         duck.mode, duck.foot, duck.until = "approach", foot, now + ROUTINE["timeout_s"]
                     # In the routine the twist is the routine's, not the policy's.
                     routine = routine_step(duck, world, i, now) if duck.mode != "walk" else None

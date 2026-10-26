@@ -154,8 +154,8 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         observations=observations,
         actions={
-            "blue_walk": WalkerCommandActionCfg(entity_name=BLUE),
-            "red_walk": WalkerCommandActionCfg(entity_name=RED, source="opponent"),
+            "blue_walk": WalkerCommandActionCfg(entity_name=BLUE, opponent_name=RED),
+            "red_walk": WalkerCommandActionCfg(entity_name=RED, opponent_name=BLUE, source="opponent"),
         },
         events={
             "reset_scene_to_default": EventTermCfg(func=reset_scene_to_default, mode="reset"),
