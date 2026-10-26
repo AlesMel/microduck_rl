@@ -36,8 +36,10 @@ TWIST_LIMITS = (0.4, 0.3, 1.0)
 # turn its back on the ball and creep at it backwards — 83% of decisions at iteration 800 — where
 # velstand barely moves (-0.03 m/s), and the match stalled into 80% draws. A duck that has to turn
 # around to cover ground plays football facing the ball.
-TWIST_LOWER = (-0.1, -0.3, -1.0)
-TWIST_UPPER = (0.4, 0.3, 1.0)
+# Sideways is capped the same way: velstand side-steps at a fraction of its forward speed, and a duck
+# that has to turn to go somewhere plays facing where it is going.
+TWIST_LOWER = (-0.1, -0.1, -1.0)
+TWIST_UPPER = (0.4, 0.1, 1.0)
 
 
 def action_to_twist(action):

@@ -24,7 +24,7 @@ def test_builds_train_and_play():
     make_microduck_soccer_env_cfg()
     play = make_microduck_soccer_env_cfg(play=True)
     assert play.scene.num_envs == 1
-    assert play.rewards["ball_approach"].weight == 0.0 and not play.curriculum
+    assert play.rewards["approach_potential"].weight == 0.0 and not play.curriculum
 
 
 def test_entities_and_actions(cfg):
@@ -44,23 +44,33 @@ def test_reward_signs(cfg):
     # Cost functions return >= 0, so their weights must be negative (AGENTS.md sign convention).
     for cost in ("existential", "fallen"):
         assert r[cost].weight < 0, cost
-    # Shaping that pays for doing the right thing is positive, and none of it may pay a duck for
-    # standing still (the kick run learned to hover when one did).
-    for shaping in ("ball_approach", "ball_to_goal", "approach_facing", "drive_through"):
+    # One shaping term per skill, each paid for an outcome, each positive.
+    for shaping in ("approach_potential", "ball_potential", "kick_outcome", "drive_through"):
         assert r[shaping].weight > 0, shaping
-    # Rewards a duck could collect without moving the ball (both were farmed): gone.
-    assert "face_ball" not in r and "kick_aim" not in r
-    # A full match of existential penalty is worth one conceded goal, no more.
+    # Rate-based terms a duck could collect without the ball moving (each was farmed in a run): gone.
+    for farmed in ("face_ball", "kick_aim", "approach_facing", "ball_approach", "ball_to_goal"):
+        assert farmed not in r, farmed
+    # A full match of existential penalty is worth one fifth of a goal: a draw is a small loss.
     assert math.isclose(r["existential"].weight * cfg.episode_length_s, -1.0)
+    assert r["goal"].weight * 0.1 == pytest.approx(5.0)
 
 
-def test_shaping_anneals_to_zero(cfg):
-    for name in ("ball_approach_weight", "approach_facing_weight", "drive_through_weight"):
-        stages = cfg.curriculum[name].params["weight_stages"]
-        assert stages[0]["weight"] > 0 and stages[-1]["weight"] == 0.0
-    # Ball-to-goal measures an outcome and keeps a floor: every run that annealed it to zero drew.
-    stages = cfg.curriculum["ball_to_goal_weight"].params["weight_stages"]
-    assert math.isclose(stages[-1]["weight"], 0.25 * stages[0]["weight"])
+def test_shaping_is_gated_by_competence(cfg):
+    terms = cfg.curriculum["competence_gate"].params["terms"]
+    assert set(terms) == {"approach_potential", "ball_potential", "kick_outcome", "drive_through"}
+    for name, (base, signal, lo, hi, floor) in terms.items():
+        assert base == cfg.rewards[name].weight, name
+        assert signal in ("approach", "shoot") and 0.0 <= lo < hi <= 1.0 and 0.0 <= floor < 1.0, name
+    # The ball terms measure outcomes and keep a quarter: every run that took all shaping away drew.
+    assert terms["ball_potential"][4] == terms["kick_outcome"][4] == 0.25
+
+
+def test_play_is_matches_without_shaping():
+    play = make_microduck_soccer_env_cfg(play=True)
+    assert play.events["scenario"].params["probs"] == (1.0, 0.0, 0.0, 0.0)
+    assert not play.curriculum
+    for name in ("approach_potential", "ball_potential", "kick_outcome", "drive_through"):
+        assert play.rewards[name].weight == 0.0
 
 
 def test_field_xml_is_current():
@@ -129,13 +139,14 @@ def test_goal_flags():
 
 
 def test_twist_mapping_caps_reverse():
-    """0 stands still, +1 is velstand's full forward, -1 only a slow reverse — torch and numpy alike."""
+    """0 stands still, +1 is velstand's full forward, -1 only a slow reverse, and sideways is slow
+    both ways — torch and numpy alike."""
     import numpy as np
 
     from mjlab_microduck.soccer.frozen_walker import TWIST_LIMITS, action_to_twist
 
     actions = torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [-1.0, -1.0, -1.0], [-3.0, 0.5, 2.0]])
-    expected = torch.tensor([[0.0, 0.0, 0.0], [0.4, 0.3, 1.0], [-0.1, -0.3, -1.0], [-0.1, 0.15, 1.0]])
+    expected = torch.tensor([[0.0, 0.0, 0.0], [0.4, 0.1, 1.0], [-0.1, -0.1, -1.0], [-0.1, 0.05, 1.0]])
     torch.testing.assert_close(action_to_twist(actions), expected)
     np.testing.assert_allclose(action_to_twist(actions.numpy()), expected.numpy(), atol=1e-6)
     # Never beyond what velstand was trained on.

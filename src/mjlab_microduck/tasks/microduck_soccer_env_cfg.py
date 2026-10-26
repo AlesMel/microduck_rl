@@ -6,12 +6,15 @@ frozen `velstand.onnx` walks it (`soccer/actions.py`). Red is the same walker dr
 snapshot of the learner, swapped in by `SelfPlayRunner` — until the first one exists red just
 stands there.
 
-One episode is one point, like Unity's soccer: it ends on a goal, on the clock (a draw), or if the
-ball escapes the pitch. Reward is Unity's shape: +5 for a goal, -5 for conceding, and an existential
-penalty summing to -1 over a full match so that a draw is worth less than a win. Shaping terms
-(close on the ball, drive it at goal) bootstrap the first iterations and are annealed — to zero,
-except the ball's own speed toward goal, which keeps a quarter — so that a policy is not paid more
-for chasing the ball than for scoring.
+One episode is one point: it ends on a goal, on the clock (a draw), or if the ball escapes the
+pitch. Each reset is either a kickoff or a practice situation — a shooting, approach or defending
+drill of at most 10 s (`soccer/scenarios.py`) — so every skill is practised from the start.
+
+Reward has Unity's core: +5 for a goal, -5 for conceding, and an existential penalty summing to -1
+over a full match. On top, one shaping term per skill, each paid only for an outcome: reaching the
+ball and moving it goalward as potential differences (unfarmable — they telescope), what a kick
+did to the ball, and running at goal from right behind it. Each is faded by competence measured in
+its drill, not by iteration count (`SHAPING_GATE`).
 
 Rewards are multiplied by step_dt (0.1 s) in mjlab, so an event that should be worth 1 has weight
 1 / step_dt.
@@ -31,7 +34,6 @@ from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
-from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 from mjlab.scene import SceneCfg
@@ -47,7 +49,8 @@ from mjlab_microduck.robot.microduck_constants import (
 from mjlab_microduck.soccer import mdp as soccer_mdp
 from mjlab_microduck.soccer.actions import WalkerCommandActionCfg
 from mjlab_microduck.soccer.field import KICKOFF_X, add_field
-from mjlab_microduck.soccer.mdp import BALL, BALL_RADIUS, BLUE, RED
+from mjlab_microduck.soccer.mdp import BALL, BALL_RADIUS, BLUE, RED, TRUNK_Z
+from mjlab_microduck.soccer.scenarios import KICKOFF, NAMES, TRAIN_PROBS
 from mjlab_microduck.tasks import mdp as microduck_mdp
 
 PHYSICS_DT = 0.005  # velstand's
@@ -55,29 +58,28 @@ DECISION_DT = 0.1  # the match policy decides at 10 Hz; the walker runs 5 ticks 
 DECIMATION = round(DECISION_DT / PHYSICS_DT)
 EPISODE_LENGTH_S = 45.0
 
-TRUNK_Z = 0.125  # velstand's reset height
-KICKOFF_NOISE = {"x": (-0.15, 0.15), "y": (-0.3, 0.3), "yaw": (-0.35, 0.35)}
-BALL_NOISE = {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}
-
 # A goal is worth 5 (an event on one step, so the weight carries 1 / step_dt). At 1 it was 0.08 per
 # point in practice against ~2-4 of shaping, and the drive run optimised the shaping instead.
 GOAL_WEIGHT = 5.0 / DECISION_DT
-APPROACH_WEIGHT = 0.5
-# The ball's speed toward the goal blue attacks: the one shaping term that measures an outcome, so
-# it cannot be collected without the ball moving. Three runs annealed every term to zero and each
-# collapsed into 84-100% draws once they were gone, so this one keeps a quarter of its weight.
-BALL_TO_GOAL_WEIGHT = 3.0
-BALL_TO_GOAL_FLOOR = 0.25
-# Walking at the ball face first: closing speed x facing, so at most 0.5 per second and only while
-# charging it. (A plain "face the ball" term, collectable standing still, taught the kick run to
-# hover outside kicking range — see `soccer_mdp.approach_facing`.)
-APPROACH_FACING_WEIGHT = 1.0
-# Running at goal from behind the ball: at most 0.4 m/s x 2 = 0.8 per second, and nothing unless the
-# duck is on the far side of the ball from the goal it attacks (`soccer_mdp.drive_through`).
-DRIVE_THROUGH_WEIGHT = 2.0
-# Shaping off by ~2000 iterations: long enough to find the ball and the goal, short enough that
-# the match reward is what the late policy is shaped by.
-SHAPING_STAGES = ((0, 1.0), (1000, 0.5), (1500, 0.25), (2000, 0.0))
+
+# One shaping term per skill, each paid only for an outcome (`soccer_mdp`). The potentials are in
+# metres and mjlab multiplies by step_dt, so these weights make a metre of progress worth the
+# number in front of `/ DECISION_DT`.
+APPROACH_POTENTIAL_WEIGHT = 0.5 / DECISION_DT  # reach the ball: +0.5 per metre closer
+BALL_POTENTIAL_WEIGHT = 1.0 / DECISION_DT  # move the ball: +1 per metre nearer the red goal
+KICK_OUTCOME_WEIGHT = 1.0 / DECISION_DT  # kick: +1 for one sending the ball at goal at 1 m/s
+DRIVE_THROUGH_WEIGHT = 2.0  # dribble: run at goal from right behind the ball, <= 0.8 per second
+
+# Shaping is taken away by competence, not by the clock (`soccer_mdp.competence_gate`):
+# reward name -> (base weight, skill signal, success rate where fading starts, where it ends, floor).
+# Reaching the ball is measured in the APPROACH drill, everything about the ball in the SHOOT drill.
+# The ball terms measure outcomes and keep a quarter: every run that took all shaping away drew.
+SHAPING_GATE = {
+    "approach_potential": (APPROACH_POTENTIAL_WEIGHT, "approach", 0.5, 0.9, 0.0),
+    "ball_potential": (BALL_POTENTIAL_WEIGHT, "shoot", 0.2, 0.6, 0.25),
+    "kick_outcome": (KICK_OUTCOME_WEIGHT, "shoot", 0.2, 0.6, 0.25),
+    "drive_through": (DRIVE_THROUGH_WEIGHT, "shoot", 0.2, 0.6, 0.0),
+}
 NUM_STEPS_PER_ENV = 24
 
 
@@ -117,18 +119,6 @@ def _ball():
     )
 
 
-def _shaping_curriculum(reward_name: str, weight: float, floor: float = 0.0) -> CurriculumTermCfg:
-    return CurriculumTermCfg(
-        func=microduck_mdp.reward_weight,
-        params={
-            "reward_name": reward_name,
-            "weight_stages": [
-                {"step": it * NUM_STEPS_PER_ENV, "weight": weight * max(k, floor)} for it, k in SHAPING_STAGES
-            ],
-        },
-    )
-
-
 def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     match = {"match": ObservationTermCfg(func=soccer_mdp.match_obs, params={"team": 1})}
     observations = {
@@ -164,42 +154,34 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         events={
             "reset_scene_to_default": EventTermCfg(func=reset_scene_to_default, mode="reset"),
             "expand_bam_friction_fields": EventTermCfg(func=microduck_mdp.expand_bam_friction_fields, mode="startup"),
-            **{
-                f"kickoff_{name}": EventTermCfg(
-                    func=envs_mdp.reset_root_state_uniform,
-                    mode="reset",
-                    params={"pose_range": KICKOFF_NOISE, "asset_cfg": SceneEntityCfg(name)},
-                )
-                for name in (BLUE, RED)
-            },
-            "kickoff_ball": EventTermCfg(
-                func=envs_mdp.reset_root_state_uniform,
-                mode="reset",
-                params={"pose_range": BALL_NOISE, "asset_cfg": SceneEntityCfg(BALL)},
-            ),
+            # Kickoff or a practice situation (shoot / approach / defend), drawn per reset.
+            "scenario": EventTermCfg(func=soccer_mdp.reset_scenario, mode="reset", params={"probs": TRAIN_PROBS}),
         },
         rewards={
             "goal": RewardTermCfg(func=soccer_mdp.goal_scored_reward, weight=GOAL_WEIGHT, params={"by": "blue"}),
             "conceded": RewardTermCfg(func=soccer_mdp.goal_scored_reward, weight=-GOAL_WEIGHT, params={"by": "red"}),
             "existential": RewardTermCfg(func=soccer_mdp.existential, weight=-1.0 / EPISODE_LENGTH_S),
-            "ball_approach": RewardTermCfg(func=soccer_mdp.ball_approach_speed, weight=APPROACH_WEIGHT),
-            "ball_to_goal": RewardTermCfg(func=soccer_mdp.ball_to_goal_speed, weight=BALL_TO_GOAL_WEIGHT),
-            "approach_facing": RewardTermCfg(func=soccer_mdp.approach_facing, weight=APPROACH_FACING_WEIGHT),
-            "drive_through": RewardTermCfg(func=soccer_mdp.drive_through, weight=DRIVE_THROUGH_WEIGHT),
             "fallen": RewardTermCfg(func=soccer_mdp.fallen, weight=-0.5),
+            "approach_potential": RewardTermCfg(
+                func=soccer_mdp.PotentialShaping, weight=APPROACH_POTENTIAL_WEIGHT, params={"kind": "approach"}
+            ),
+            "ball_potential": RewardTermCfg(
+                func=soccer_mdp.PotentialShaping, weight=BALL_POTENTIAL_WEIGHT, params={"kind": "ball"}
+            ),
+            "kick_outcome": RewardTermCfg(func=soccer_mdp.KickOutcome, weight=KICK_OUTCOME_WEIGHT),
+            "drive_through": RewardTermCfg(func=soccer_mdp.drive_through, weight=DRIVE_THROUGH_WEIGHT),
         },
         terminations={
             "time_out": TerminationTermCfg(func=envs_mdp.time_out, time_out=True),
+            # Practice situations are short: a truncation, not a failure.
+            "drill_timeout": TerminationTermCfg(func=soccer_mdp.drill_timed_out, time_out=True),
             "blue_scored": TerminationTermCfg(func=soccer_mdp.goal_scored, params={"by": "blue"}),
             "red_scored": TerminationTermCfg(func=soccer_mdp.goal_scored, params={"by": "red"}),
             "ball_out": TerminationTermCfg(func=soccer_mdp.ball_left_pitch),
             "nan_state": TerminationTermCfg(func=soccer_mdp.any_state_is_nan),
         },
         curriculum={
-            "ball_approach_weight": _shaping_curriculum("ball_approach", APPROACH_WEIGHT),
-            "ball_to_goal_weight": _shaping_curriculum("ball_to_goal", BALL_TO_GOAL_WEIGHT, floor=BALL_TO_GOAL_FLOOR),
-            "approach_facing_weight": _shaping_curriculum("approach_facing", APPROACH_FACING_WEIGHT),
-            "drive_through_weight": _shaping_curriculum("drive_through", DRIVE_THROUGH_WEIGHT),
+            "competence_gate": CurriculumTermCfg(func=soccer_mdp.competence_gate, params={"terms": SHAPING_GATE}),
         },
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.WORLD,
@@ -219,12 +201,11 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
     if play:
         cfg.scene.num_envs = 1
-        # No shaping in play: the log should show the match, not the bootstrap.
+        # Matches only, and no shaping: play (and the 50 fps renders) should show the game itself.
+        cfg.events["scenario"].params["probs"] = tuple(1.0 if i == KICKOFF else 0.0 for i in range(len(NAMES)))
         cfg.curriculum = {}
-        cfg.rewards["ball_approach"].weight = 0.0
-        cfg.rewards["ball_to_goal"].weight = 0.0
-        cfg.rewards["approach_facing"].weight = 0.0
-        cfg.rewards["drive_through"].weight = 0.0
+        for name in SHAPING_GATE:
+            cfg.rewards[name].weight = 0.0
     return cfg
 
 

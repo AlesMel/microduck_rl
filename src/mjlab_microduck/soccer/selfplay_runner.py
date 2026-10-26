@@ -74,7 +74,12 @@ class SelfPlayRunner(MjlabOnPolicyRunner):
         learner = self.env.unwrapped.action_manager.get_term(LEARNER_TERM)
         self._log(it, kicks_per_env=float(learner.kicks_fired) / self.env.num_envs)
         learner.kicks_fired.zero_()
-        blue, red, draws = match_stats(self.env.unwrapped).take()
+        stats = match_stats(self.env.unwrapped)
+        # Per practice situation (score / concede rate per drill, running approach and shoot rates):
+        # the per-skill view, before `take` clears the counts.
+        self._log(it, prefix="Scenario", **stats.take_scenarios())
+        # Elo is about matches, so only KICKOFF points count here.
+        blue, red, draws = stats.take()
         points = blue + red + draws
         if points > 0:
             score = (blue + 0.5 * draws) / points
@@ -91,12 +96,12 @@ class SelfPlayRunner(MjlabOnPolicyRunner):
             policy, elo = self.pool[-1] if random.random() < PLAY_LATEST else random.choice(self.pool)
             self._set_opponent(policy, elo)
 
-    def _log(self, it: int, **scalars: float) -> None:
+    def _log(self, it: int, prefix: str = "SelfPlay", **scalars: float) -> None:
         writer = self.logger.writer
         if writer is None:
             return
         for name, value in scalars.items():
-            writer.add_scalar(f"SelfPlay/{name}", value, it)
+            writer.add_scalar(f"{prefix}/{name}", value, it)
 
     # ── persistence: a resumed run keeps its opponents and its rating ──
 

@@ -21,6 +21,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab_microduck.soccer.field import FIELD
+from mjlab_microduck.soccer.scenarios import APPROACH, KICKOFF, SHOOT, TRAIN_PROBS, yaw_quat
+from mjlab_microduck.soccer.scenarios import NAMES as SCENARIO_NAMES
+from mjlab_microduck.soccer.scenarios import sample as sample_layout
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
 BLUE, RED = "robot_blue", "robot_red"
 BALL = "ball"
 BALL_RADIUS = 0.035
+TRUNK_Z = 0.125  # velstand's reset height
+DRILL_SECONDS = 10.0
 
 # A duck lying on its side reads gravity z ~ 0; upright is -1. Past 60° it is not playing.
 FALLEN_GRAVITY_Z = -0.5
@@ -180,7 +185,13 @@ def ball_out(ball_local: torch.Tensor) -> torch.Tensor:
 
 
 class MatchStats:
-    """Outcome counts since the self-play runner last read them: blue wins, red wins, draws.
+    """What the self-play runner and the competence gate read about how play is going.
+
+    - blue / red / draws: outcomes of KICKOFF points only — real matches, what Elo is about. The
+      practice situations are not a match against the opponent and would skew it.
+    - points / blue_goals / red_goals (4,): per practice situation, for `Scenario/*` logging.
+    - approach_rate: running fraction of APPROACH drills in which blue reached the ball.
+    - shoot_rate: running fraction of SHOOT drills blue scored from.
 
     Updated out of place, never `+=`/`zero_()`: the rollout runs under `torch.inference_mode()`
     and the runner reads outside it, and an in-place op on an inference tensor outside that mode
@@ -191,15 +202,40 @@ class MatchStats:
         self._device = device
         self._step = -1
         self.blue_scored = self.red_scored = None
+        self.approach_rate = torch.zeros((), device=device)
+        self.shoot_rate = torch.zeros((), device=device)
         self._zero()
 
     def _zero(self) -> None:
-        self.blue = self.red = self.draws = torch.zeros((), device=self._device)
+        z = torch.zeros((), device=self._device)
+        self.blue = self.red = self.draws = z
+        z4 = torch.zeros(len(SCENARIO_NAMES), device=self._device)
+        self.points = self.blue_goals = self.red_goals = z4
 
     def take(self) -> tuple[float, float, float]:
+        """Kickoff outcomes since the last call (blue wins, red wins, draws). Also clears the
+        per-situation counts: read `take_scenarios` first."""
         out = (float(self.blue), float(self.red), float(self.draws))
         self._zero()
         return out
+
+    def take_scenarios(self) -> dict[str, float]:
+        out = {}
+        for i, name in enumerate(SCENARIO_NAMES):
+            n = float(self.points[i])
+            if n > 0:
+                out[f"{name}_score"] = float(self.blue_goals[i]) / n
+                out[f"{name}_concede"] = float(self.red_goals[i]) / n
+        out["approach_rate"] = float(self.approach_rate)
+        out["shoot_rate"] = float(self.shoot_rate)
+        return out
+
+
+# Each finished drill moves its running rate this much toward its own outcome: ~1000 drills of memory,
+# about one PPO iteration's worth at 1024 envs.
+RATE_STEP = 0.001
+# "Reached the ball" in an approach drill: trunk within this of the ball's centre.
+TOUCH_DIST = 0.15
 
 
 def match_stats(env: ManagerBasedRlEnv) -> MatchStats:
@@ -209,17 +245,99 @@ def match_stats(env: ManagerBasedRlEnv) -> MatchStats:
     return stats
 
 
+def scenario(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Each env's practice situation (`scenarios.KICKOFF`, ...), set by `reset_scenario`."""
+    kinds = getattr(env, "_soccer_scenario", None)
+    if kinds is None:
+        kinds = env._soccer_scenario = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env._soccer_touched = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return kinds
+
+
+def drill_timed_out(env: ManagerBasedRlEnv, seconds: float = DRILL_SECONDS) -> torch.Tensor:
+    """A practice situation's clock ran out. A drill is a few seconds of one skill, not a match."""
+    return (scenario(env) != KICKOFF) & (env.episode_length_buf >= round(seconds / env.step_dt))
+
+
 def _referee(env: ManagerBasedRlEnv) -> MatchStats:
     """Decide this step's goals once, however many terms ask, and count the outcomes."""
     stats = match_stats(env)
-    if stats._step != env.common_step_counter:
-        stats._step = env.common_step_counter
-        stats.blue_scored, stats.red_scored = goal_flags(_local(env, BALL))
-        stats.blue = stats.blue + stats.blue_scored.sum()
-        stats.red = stats.red + stats.red_scored.sum()
-        timed_out = env.episode_length_buf >= env.max_episode_length
-        stats.draws = stats.draws + (timed_out & ~stats.blue_scored & ~stats.red_scored).sum()
+    if stats._step == env.common_step_counter:
+        return stats
+    stats._step = env.common_step_counter
+    stats.blue_scored, stats.red_scored = goal_flags(_local(env, BALL))
+    kinds = scenario(env)
+    touched = env._soccer_touched
+    touched |= (_local(env, BALL) - _local(env, BLUE))[:, :2].norm(dim=-1) < TOUCH_DIST
+
+    timed_out = env.episode_length_buf >= env.max_episode_length
+    ended = stats.blue_scored | stats.red_scored | timed_out | drill_timed_out(env)
+    goal = stats.blue_scored | stats.red_scored
+    kickoff = kinds == KICKOFF
+    stats.blue = stats.blue + (stats.blue_scored & kickoff).sum()
+    stats.red = stats.red + (stats.red_scored & kickoff).sum()
+    stats.draws = stats.draws + (timed_out & ~goal & kickoff).sum()
+
+    per_kind = ended.unsqueeze(-1) & (kinds.unsqueeze(-1) == torch.arange(len(SCENARIO_NAMES), device=env.device))
+    stats.points = stats.points + per_kind.sum(0)
+    stats.blue_goals = stats.blue_goals + (per_kind & stats.blue_scored.unsqueeze(-1)).sum(0)
+    stats.red_goals = stats.red_goals + (per_kind & stats.red_scored.unsqueeze(-1)).sum(0)
+
+    done_approach, done_shoot = per_kind[:, APPROACH], per_kind[:, SHOOT]
+    stats.approach_rate = stats.approach_rate + RATE_STEP * (
+        (done_approach & touched).sum() - stats.approach_rate * done_approach.sum()
+    )
+    stats.shoot_rate = stats.shoot_rate + RATE_STEP * (
+        (done_shoot & stats.blue_scored).sum() - stats.shoot_rate * done_shoot.sum()
+    )
     return stats
+
+
+def reset_scenario(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None, probs: tuple[float, ...] = TRAIN_PROBS) -> None:
+    """Reset event: draw each env's practice situation and place both ducks and the ball for it.
+
+    After `reset_scene_to_default`, which has already put every joint at the default pose.
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    kinds = scenario(env)
+    weights = torch.tensor(probs, device=env.device, dtype=torch.float)
+    drawn = torch.multinomial(weights, len(env_ids), replacement=True)
+    kinds[env_ids] = drawn
+    env._soccer_touched[env_ids] = False
+    layout = sample_layout(drawn)
+    origin = env.scene.env_origins[env_ids]
+    n = len(env_ids)
+    zeros6 = torch.zeros(n, 6, device=env.device)
+
+    def state(xy, z, quat):
+        pos = torch.cat((xy, torch.full((n, 1), z, device=env.device)), dim=-1) + origin
+        return torch.cat((pos, quat, zeros6), dim=-1)
+
+    env.scene[BLUE].write_root_state_to_sim(state(layout.blue_xy, TRUNK_Z, yaw_quat(layout.blue_yaw)), env_ids)
+    env.scene[RED].write_root_state_to_sim(state(layout.red_xy, TRUNK_Z, yaw_quat(layout.red_yaw)), env_ids)
+    upright = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device).expand(n, 4)
+    env.scene[BALL].write_root_state_to_sim(state(layout.ball_xy, BALL_RADIUS, upright), env_ids)
+
+
+def competence_gate(env: ManagerBasedRlEnv, env_ids: torch.Tensor, terms: dict) -> dict:
+    """Curriculum: scale each shaping term by how well its skill is already done, not by the clock.
+
+    `terms` maps a reward name to (base weight, signal, lo, hi, floor) with signal "approach" or
+    "shoot": full weight while the skill's success rate is below `lo`, falling linearly to
+    `floor` x base at `hi`. Every run annealed on a fixed iteration count, and every one collapsed
+    into draws when shaping went before scoring had been learned.
+    """
+    del env_ids
+    stats = match_stats(env)
+    signal = {"approach": float(stats.approach_rate), "shoot": float(stats.shoot_rate)}
+    out = {"approach_rate": signal["approach"], "shoot_rate": signal["shoot"]}
+    for name, (base, which, lo, hi, floor) in terms.items():
+        progress = min(1.0, max(0.0, (signal[which] - lo) / (hi - lo)))
+        scale = 1.0 - progress * (1.0 - floor)
+        env.reward_manager.get_term_cfg(name).weight = base * scale
+        out[f"{name}_scale"] = scale
+    return out
 
 
 def goal_scored(env: ManagerBasedRlEnv, by: str = "blue") -> torch.Tensor:
@@ -315,6 +433,74 @@ def drive_through(
     goalward = (env.scene[asset_name].data.root_link_lin_vel_w[:, :2] * to_goal).sum(-1)
     close = ((ball_xy - duck_xy).norm(dim=-1) <= near).float()
     return goalward.clamp(0.0, max_speed) * behind.clamp(0.0, 1.0) * close
+
+
+def potential(env: ManagerBasedRlEnv, kind: str, team: int = 1) -> torch.Tensor:
+    """Phi for potential shaping, in metres (<= 0, higher is better).
+
+    "approach": minus blue's distance to the ball. "ball": minus the ball's distance to the centre
+    of the goal `team` attacks.
+    """
+    ball = _local(env, BALL)[:, :2]
+    if kind == "approach":
+        return -(ball - _local(env, BLUE if team > 0 else RED)[:, :2]).norm(dim=-1)
+    goal = ball.new_tensor((team * FIELD.half_length, 0.0))
+    return -(goal - ball).norm(dim=-1)
+
+
+class PotentialShaping:
+    """Reward term: Phi(s') - Phi(s), Ng et al.'s potential-based shaping.
+
+    Summed over a point it telescopes to Phi(end) - Phi(start): circling, hovering, pushing back and
+    forth or standing still earn exactly nothing, only being closer at the end than at the start
+    does. That is the property every rate-based shaping term in this task lacked, and each was
+    farmed in turn. Undiscounted on purpose: with gamma < 1 the (gamma - 1) Phi term pays a little
+    every step for being far away.
+
+    The first step after a reset pays 0 and records Phi, so a point never inherits the jump from
+    the previous point's final state.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        self.prev = torch.zeros(env.num_envs, device=env.device)
+        self.fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids=None) -> None:
+        self.fresh[slice(None) if env_ids is None else env_ids] = True
+
+    def __call__(self, env: ManagerBasedRlEnv, kind: str = "approach", team: int = 1) -> torch.Tensor:
+        phi = potential(env, kind, team)
+        out = torch.where(self.fresh, torch.zeros_like(phi), phi - self.prev)
+        self.prev[:] = phi
+        self.fresh[:] = False
+        return out
+
+
+class KickOutcome:
+    """Reward term: what blue's kick did, `delay_s` after it fired — the ball's speed toward the goal
+    blue attacks (m/s, clamped). A kick into the opponent, the air or a wall pays nothing; one at
+    the own goal costs.
+
+    Replaces paying the kick itself (`kick_aim`), which the aim run collected 832 times in 16
+    matches without the ball ever moving.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        self.countdown = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+    def reset(self, env_ids=None) -> None:
+        self.countdown[slice(None) if env_ids is None else env_ids] = 0
+
+    def __call__(
+        self, env: ManagerBasedRlEnv, term: str = "blue_walk", team: int = 1, delay_s: float = 0.5, max_speed: float = 1.0
+    ) -> torch.Tensor:
+        due = self.countdown == 1
+        speed = ball_to_goal_speed(env, team=team, max_speed=max_speed)
+        out = torch.where(due, speed, torch.zeros_like(speed))
+        self.countdown.sub_(1).clamp_(min=0)
+        fired = env.action_manager.get_term(term).fired_now
+        self.countdown[:] = torch.where(fired, torch.full_like(self.countdown, round(delay_s / env.step_dt) + 1), self.countdown)
+        return out
 
 
 def fallen(env: ManagerBasedRlEnv, asset_name: str = BLUE) -> torch.Tensor:
