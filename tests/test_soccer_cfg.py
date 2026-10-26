@@ -24,7 +24,7 @@ def test_builds_train_and_play():
     make_microduck_soccer_env_cfg()
     play = make_microduck_soccer_env_cfg(play=True)
     assert play.scene.num_envs == 1
-    assert play.rewards["approach_potential"].weight == 0.0 and not play.curriculum
+    assert play.rewards["ball_potential"].weight == 0.0 and not play.curriculum
 
 
 def test_entities_and_actions(cfg):
@@ -44,9 +44,11 @@ def test_reward_signs(cfg):
     # Cost functions return >= 0, so their weights must be negative (AGENTS.md sign convention).
     for cost in ("existential", "fallen"):
         assert r[cost].weight < 0, cost
-    # One shaping term per skill, each paid for an outcome, each positive.
-    for shaping in ("approach_potential", "ball_potential", "kick_outcome", "drive_through"):
+    # Only outcomes are rewarded; getting to the ball is the teacher's job.
+    for shaping in ("ball_potential", "kick_outcome"):
         assert r[shaping].weight > 0, shaping
+    for taught in ("approach_potential", "drive_through"):
+        assert taught not in r, taught
     # Rate-based terms a duck could collect without the ball moving (each was farmed in a run): gone.
     for farmed in ("face_ball", "kick_aim", "approach_facing", "ball_approach", "ball_to_goal"):
         assert farmed not in r, farmed
@@ -57,7 +59,7 @@ def test_reward_signs(cfg):
 
 def test_shaping_is_gated_by_competence(cfg):
     terms = cfg.curriculum["competence_gate"].params["terms"]
-    assert set(terms) == {"approach_potential", "ball_potential", "kick_outcome", "drive_through"}
+    assert set(terms) == {"ball_potential", "kick_outcome"}
     for name, (base, signal, lo, hi, floor) in terms.items():
         assert base == cfg.rewards[name].weight, name
         assert signal in ("approach", "shoot") and 0.0 <= lo < hi <= 1.0 and 0.0 <= floor < 1.0, name
@@ -69,8 +71,18 @@ def test_play_is_matches_without_shaping():
     play = make_microduck_soccer_env_cfg(play=True)
     assert play.events["scenario"].params["probs"] == (1.0, 0.0, 0.0, 0.0)
     assert not play.curriculum
-    for name in ("approach_potential", "ball_potential", "kick_outcome", "drive_through"):
+    for name in ("ball_potential", "kick_outcome"):
         assert play.rewards[name].weight == 0.0
+
+
+def test_teacher_rides_along_but_is_not_observed(cfg):
+    """The oracle's action is a rollout group for PpoWithTeacher, never an input to the policy."""
+    from mjlab_microduck.tasks.microduck_soccer_env_cfg import MicroduckSoccerRlCfg
+
+    assert "teacher" in cfg.observations
+    groups = MicroduckSoccerRlCfg.obs_groups
+    assert all("teacher" not in g for g in groups.values())
+    assert MicroduckSoccerRlCfg.algorithm.class_name.endswith("PpoWithTeacher")
 
 
 def test_field_xml_is_current():

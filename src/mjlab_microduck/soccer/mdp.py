@@ -251,6 +251,8 @@ class MatchStats:
         self.blue = self.red = self.draws = z
         z4 = torch.zeros(len(SCENARIO_NAMES), device=self._device)
         self.points = self.blue_goals = self.red_goals = z4
+        # Kickoff outcomes by opponent kind: rows statue / oracle / snapshot, columns win / loss / draw.
+        self.vs = torch.zeros(len(OPP_NAMES), 3, device=self._device)
 
     def take(self) -> tuple[float, float, float]:
         """Kickoff outcomes since the last call (blue wins, red wins, draws). Also clears the
@@ -258,6 +260,10 @@ class MatchStats:
         out = (float(self.blue), float(self.red), float(self.draws))
         self._zero()
         return out
+
+    def take_vs(self) -> dict[str, tuple[float, float, float]]:
+        """Kickoff (wins, losses, draws) per opponent kind since the last `take`. Read before it."""
+        return {name: tuple(float(v) for v in self.vs[i]) for i, name in enumerate(OPP_NAMES)}
 
     def take_scenarios(self) -> dict[str, float]:
         out = {}
@@ -269,6 +275,19 @@ class MatchStats:
         out["approach_rate"] = float(self.approach_rate)
         out["shoot_rate"] = float(self.shoot_rate)
         return out
+
+
+# Who red is in each env, set by the self-play runner: a statue, the scripted oracle, or a frozen
+# snapshot of the learner. Kickoff outcomes are counted per kind so each yardstick stays clean.
+OPP_STATUE, OPP_ORACLE, OPP_SNAPSHOT = 0, 1, 2
+OPP_NAMES = ("statue", "oracle", "snapshot")
+
+
+def opponent_kind(env: ManagerBasedRlEnv) -> torch.Tensor:
+    kinds = getattr(env, "_soccer_opp_kind", None)
+    if kinds is None:
+        kinds = env._soccer_opp_kind = torch.full((env.num_envs,), OPP_SNAPSHOT, dtype=torch.long, device=env.device)
+    return kinds
 
 
 # Each finished drill moves its running rate this much toward its own outcome: ~1000 drills of memory,
@@ -317,6 +336,9 @@ def _referee(env: ManagerBasedRlEnv) -> MatchStats:
     stats.blue = stats.blue + (stats.blue_scored & kickoff).sum()
     stats.red = stats.red + (stats.red_scored & kickoff).sum()
     stats.draws = stats.draws + (timed_out & ~goal & kickoff).sum()
+    outcome = torch.stack((stats.blue_scored, stats.red_scored, timed_out & ~goal), -1) & kickoff.unsqueeze(-1)
+    by_opp = opponent_kind(env).unsqueeze(-1) == torch.arange(len(OPP_NAMES), device=env.device)
+    stats.vs = stats.vs + (by_opp.unsqueeze(-1) & outcome.unsqueeze(1)).sum(0)
 
     per_kind = ended.unsqueeze(-1) & (kinds.unsqueeze(-1) == torch.arange(len(SCENARIO_NAMES), device=env.device))
     stats.points = stats.points + per_kind.sum(0)
