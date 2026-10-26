@@ -8,7 +8,7 @@ stands there.
 
 One episode is one point, like Unity's soccer: it ends on a goal, on the clock (a draw), or if the
 ball escapes the pitch. Reward is Unity's: +1 for a goal, -1 for conceding, and an existential
-penalty summing to -1 over a full match so that a draw is worth less than a win. Two shaping terms
+penalty summing to -1 over a full match so that a draw is worth less than a win. Shaping terms
 (close on the ball, move the ball toward the goal) bootstrap the first few hundred iterations and
 are annealed to zero — a policy still paid for chasing the ball would chase rather than score.
 
@@ -60,14 +60,18 @@ BALL_NOISE = {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}
 
 GOAL_WEIGHT = 1.0 / DECISION_DT
 APPROACH_WEIGHT = 0.5
-BALL_TO_GOAL_WEIGHT = 1.0
+# The ball's speed toward the goal blue attacks: the one shaping term that measures an outcome, so
+# it cannot be collected without the ball moving. Three runs annealed every term to zero and each
+# collapsed into 84-100% draws once they were gone, so this one keeps a quarter of its weight.
+BALL_TO_GOAL_WEIGHT = 3.0
+BALL_TO_GOAL_FLOOR = 0.25
 # Walking at the ball face first: closing speed x facing, so at most 0.5 per second and only while
 # charging it. (A plain "face the ball" term, collectable standing still, taught the kick run to
 # hover outside kicking range — see `soccer_mdp.approach_facing`.)
 APPROACH_FACING_WEIGHT = 1.0
-# A kick aimed straight at the goal it attacks is worth +0.3, one at its own goal -0.3. An event on
-# one step, so the weight carries 1 / step_dt like the goal's.
-KICK_AIM_WEIGHT = 0.3 / DECISION_DT
+# Running at goal from behind the ball: at most 0.4 m/s x 2 = 0.8 per second, and nothing unless the
+# duck is on the far side of the ball from the goal it attacks (`soccer_mdp.drive_through`).
+DRIVE_THROUGH_WEIGHT = 2.0
 # Shaping off by ~2000 iterations: long enough to find the ball and the goal, short enough that
 # the match reward is what the late policy is shaped by.
 SHAPING_STAGES = ((0, 1.0), (1000, 0.5), (1500, 0.25), (2000, 0.0))
@@ -110,12 +114,14 @@ def _ball():
     )
 
 
-def _shaping_curriculum(reward_name: str, weight: float) -> CurriculumTermCfg:
+def _shaping_curriculum(reward_name: str, weight: float, floor: float = 0.0) -> CurriculumTermCfg:
     return CurriculumTermCfg(
         func=microduck_mdp.reward_weight,
         params={
             "reward_name": reward_name,
-            "weight_stages": [{"step": it * NUM_STEPS_PER_ENV, "weight": weight * k} for it, k in SHAPING_STAGES],
+            "weight_stages": [
+                {"step": it * NUM_STEPS_PER_ENV, "weight": weight * max(k, floor)} for it, k in SHAPING_STAGES
+            ],
         },
     )
 
@@ -176,7 +182,7 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "ball_approach": RewardTermCfg(func=soccer_mdp.ball_approach_speed, weight=APPROACH_WEIGHT),
             "ball_to_goal": RewardTermCfg(func=soccer_mdp.ball_to_goal_speed, weight=BALL_TO_GOAL_WEIGHT),
             "approach_facing": RewardTermCfg(func=soccer_mdp.approach_facing, weight=APPROACH_FACING_WEIGHT),
-            "kick_aim": RewardTermCfg(func=soccer_mdp.kick_aim, weight=KICK_AIM_WEIGHT),
+            "drive_through": RewardTermCfg(func=soccer_mdp.drive_through, weight=DRIVE_THROUGH_WEIGHT),
             "fallen": RewardTermCfg(func=soccer_mdp.fallen, weight=-0.5),
         },
         terminations={
@@ -188,9 +194,9 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         },
         curriculum={
             "ball_approach_weight": _shaping_curriculum("ball_approach", APPROACH_WEIGHT),
-            "ball_to_goal_weight": _shaping_curriculum("ball_to_goal", BALL_TO_GOAL_WEIGHT),
+            "ball_to_goal_weight": _shaping_curriculum("ball_to_goal", BALL_TO_GOAL_WEIGHT, floor=BALL_TO_GOAL_FLOOR),
             "approach_facing_weight": _shaping_curriculum("approach_facing", APPROACH_FACING_WEIGHT),
-            "kick_aim_weight": _shaping_curriculum("kick_aim", KICK_AIM_WEIGHT),
+            "drive_through_weight": _shaping_curriculum("drive_through", DRIVE_THROUGH_WEIGHT),
         },
         viewer=ViewerConfig(
             origin_type=ViewerConfig.OriginType.WORLD,
@@ -215,7 +221,7 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.rewards["ball_approach"].weight = 0.0
         cfg.rewards["ball_to_goal"].weight = 0.0
         cfg.rewards["approach_facing"].weight = 0.0
-        cfg.rewards["kick_aim"].weight = 0.0
+        cfg.rewards["drive_through"].weight = 0.0
     return cfg
 
 
@@ -224,14 +230,16 @@ MicroduckSoccerRlCfg = RslRlOnPolicyRunnerCfg(
         hidden_dims=(256, 128),
         activation="elu",
         obs_normalization=True,
-        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 0.8, "std_type": "scalar"},
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 0.6, "std_type": "scalar"},
     ),
     critic=RslRlModelCfg(hidden_dims=(256, 128), activation="elu", obs_normalization=True),
     algorithm=RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        # Low: the actions are clipped to [-1, 1], so a wider Gaussian costs the policy nothing it can
+        # see, and at 0.005 the aim run's std climbed to 2.9 — random play — by iteration 400.
+        entropy_coef=0.001,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,

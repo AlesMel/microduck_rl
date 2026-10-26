@@ -46,17 +46,21 @@ def test_reward_signs(cfg):
         assert r[cost].weight < 0, cost
     # Shaping that pays for doing the right thing is positive, and none of it may pay a duck for
     # standing still (the kick run learned to hover when one did).
-    for shaping in ("ball_approach", "ball_to_goal", "approach_facing", "kick_aim"):
+    for shaping in ("ball_approach", "ball_to_goal", "approach_facing", "drive_through"):
         assert r[shaping].weight > 0, shaping
-    assert "face_ball" not in r
+    # Rewards a duck could collect without moving the ball (both were farmed): gone.
+    assert "face_ball" not in r and "kick_aim" not in r
     # A full match of existential penalty is worth one conceded goal, no more.
     assert math.isclose(r["existential"].weight * cfg.episode_length_s, -1.0)
 
 
 def test_shaping_anneals_to_zero(cfg):
-    for name in ("ball_approach_weight", "ball_to_goal_weight", "approach_facing_weight", "kick_aim_weight"):
+    for name in ("ball_approach_weight", "approach_facing_weight", "drive_through_weight"):
         stages = cfg.curriculum[name].params["weight_stages"]
         assert stages[0]["weight"] > 0 and stages[-1]["weight"] == 0.0
+    # Ball-to-goal measures an outcome and keeps a floor: every run that annealed it to zero drew.
+    stages = cfg.curriculum["ball_to_goal_weight"].params["weight_stages"]
+    assert math.isclose(stages[-1]["weight"], 0.25 * stages[0]["weight"])
 
 
 def test_field_xml_is_current():

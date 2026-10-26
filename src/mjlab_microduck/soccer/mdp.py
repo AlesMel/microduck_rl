@@ -293,20 +293,22 @@ def approach_facing(env: ManagerBasedRlEnv, asset_name: str = BLUE, max_speed: f
     return closing.clamp(0.0, max_speed) * facing
 
 
-def kick_aim(env: ManagerBasedRlEnv, asset_name: str = BLUE, team: int = 1) -> torch.Tensor:
-    """On the step a kick fires: cos(the duck's heading, ball -> centre of the goal it attacks).
-    +1 for a kick straight at goal, -1 for one at its own; 0 on every other step.
+def drive_through(env: ManagerBasedRlEnv, asset_name: str = BLUE, team: int = 1, max_speed: float = 0.4) -> torch.Tensor:
+    """The duck's velocity toward the goal it attacks (m/s, >= 0, clamped), scaled by how squarely it
+    stands behind the ball on that line: duck -> ball -> goal. Running through the ball at goal pays;
+    standing still, standing beside the ball, or between the ball and the goal pays nothing.
 
-    A kick is the only shot this duck has — walking pushes the ball at ~0.12 m/s — and the kick run
-    learned to stop kicking because a kick was never worth anything until a goal, which random
-    kicks almost never produced. This pays the aim, not the kick, so kicking the ball anywhere
-    but forward is not a way to collect it.
+    Paid on the duck's motion, but only where that motion carries the ball goalward, so it cannot be
+    collected without bringing the ball along. It replaces a reward for firing a kick aimed at goal,
+    which the aim run (2026-10-26) farmed: both ducks within 20 cm of the ball 88% of the time,
+    kicking it into each other nonstop — 832 kicks in 16 matches and the ball never moved.
     """
-    fired = env.action_manager.get_term(ACTION_TERMS[team]).fired_now
-    goal = _local(env, BALL).new_tensor((team * FIELD.half_length, 0.0))
-    to_goal = _unit(goal - _local(env, BALL)[:, :2])
-    aim = (_heading(env, asset_name) * to_goal).sum(-1)
-    return torch.where(fired, aim, torch.zeros_like(aim))
+    ball_xy = _local(env, BALL)[:, :2]
+    duck_xy = _local(env, asset_name)[:, :2]
+    to_goal = _unit(ball_xy.new_tensor((team * FIELD.half_length, 0.0)) - ball_xy)
+    behind = (_unit(ball_xy - duck_xy) * to_goal).sum(-1)
+    goalward = (env.scene[asset_name].data.root_link_lin_vel_w[:, :2] * to_goal).sum(-1)
+    return goalward.clamp(0.0, max_speed) * behind.clamp(0.0, 1.0)
 
 
 def fallen(env: ManagerBasedRlEnv, asset_name: str = BLUE) -> torch.Tensor:
