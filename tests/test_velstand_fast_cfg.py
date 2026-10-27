@@ -1,0 +1,206 @@
+"""Cfg invariants for VelStandFast (velstand + speed-dependent air time, vx fine tracking,
+walk anchor faded out with forward speed). CPU only, never steps an env."""
+import math
+from types import SimpleNamespace
+
+import pytest
+import torch
+from tensordict import TensorDict
+
+import mjlab_microduck.tasks  # noqa: F401  (registers tasks)
+from mjlab.tasks.registry import load_env_cfg, load_rl_cfg
+from mjlab_microduck.robot.microduck_constants import get_allcollisions_backlash_spec
+from mjlab_microduck.tasks import mdp as microduck_mdp
+from mjlab_microduck.tasks import microduck_velstand_env_cfg as vs
+from mjlab_microduck.tasks import microduck_velstand_fast_env_cfg as vf
+from mjlab_microduck.tasks.distill import PpoWithExpertBc, anchor_vx_fade_weight
+
+TASKS = (
+    "Mjlab-VelStandFast-Flat-MicroDuck",
+    "Mjlab-VelStandFast-Rough-MicroDuck",
+    "Mjlab-VelStandFast-Flat-Backlash-MicroDuck",
+    "Mjlab-VelStandFast-Rough-Backlash-MicroDuck",
+)
+
+
+# ── Cfg ──────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("task", TASKS)
+def test_tasks_registered(task):
+    assert load_env_cfg(task) is not None and load_env_cfg(task, play=True) is not None
+    assert load_rl_cfg(task).experiment_name == "velstand_fast"
+
+
+def test_backlash_variant_uses_velstand_model():
+    cfg = load_env_cfg("Mjlab-VelStandFast-Rough-Backlash-MicroDuck")
+    assert cfg.scene.entities["robot"].spec_fn is get_allcollisions_backlash_spec
+
+
+@pytest.mark.parametrize("play", [False, True])
+def test_only_the_speed_terms_differ_from_velstand(play):
+    base = vs.make_microduck_velstand_env_cfg(play=play)
+    cfg = vf.make_microduck_velstand_fast_env_cfg(play=play)
+    assert set(cfg.rewards) == set(base.rewards) | {"track_vx_fine"}
+    for name in base.rewards:
+        if name == "air_time":
+            continue
+        assert cfg.rewards[name].func is base.rewards[name].func, name
+        assert cfg.rewards[name].weight == base.rewards[name].weight, name
+    assert set(cfg.curriculum) == set(base.curriculum)        # no new curricula: plain resume from v8
+    assert cfg.commands["twist"].ranges == base.commands["twist"].ranges
+    assert cfg.observations["actor"].terms.keys() == base.observations["actor"].terms.keys()
+
+
+def test_air_time_term_wired():
+    base = vs.make_microduck_velstand_env_cfg()
+    at = vf.make_microduck_velstand_fast_env_cfg().rewards["air_time"]
+    assert at.func is microduck_mdp.feet_air_time_speed_window
+    assert at.weight == base.rewards["air_time"].weight > 0
+    p = at.params
+    assert p["sensor_name"] == base.rewards["air_time"].params["sensor_name"]
+    assert p["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
+    # slow end = velstand's window, so standing, slow walking and turning are unchanged
+    assert p["min_knots"][0] == base.rewards["air_time"].params["threshold_min"]
+    assert p["max_knots"][0] == base.rewards["air_time"].params["threshold_max"]
+    # fast end: a ~0.13 s swing is inside, velstand's measured 0.25 s swing is not
+    assert p["min_knots"][1] < 0.13 < p["max_knots"][1] < 0.25
+
+
+def test_vx_fine_term_wired():
+    cfg = vf.make_microduck_velstand_fast_env_cfg()
+    base = vs.make_microduck_velstand_env_cfg()
+    f = cfg.rewards["track_vx_fine"]
+    assert f.func is microduck_mdp.track_lin_vel_x_fine and f.weight > 0
+    assert f.params["std"] < base.rewards["track_linear_velocity"].params["std"]
+    assert cfg.rewards["track_linear_velocity"].params == base.rewards["track_linear_velocity"].params
+
+
+def test_anchor_fade_only_in_fast_runner_cfg():
+    fast = vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg
+    assert fast["anchor_vx_fade"] == vf.ANCHOR_VX_FADE
+    assert vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.get("anchor_vx_fade") is None  # deepcopy, velstand untouched
+    lo, hi = vf.ANCHOR_VX_FADE
+    assert vf.AIR_SPEED_KNOTS[0] <= lo < hi < vf.AIR_SPEED_KNOTS[1]
+    # everything else about the BC is velstand's
+    assert {k: v for k, v in fast.items() if k != "anchor_vx_fade"} == \
+           {k: v for k, v in vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.items() if k != "anchor_vx_fade"}
+    assert vf.MicroduckVelStandFastRlCfg.experiment_name != vs.MicroduckVelStandRlCfg.experiment_name
+
+
+# ── Reward functions ─────────────────────────────────────────────────────────
+
+def test_air_time_window_interpolates_and_clamps():
+    v = torch.tensor([0.0, 0.1, 0.25, 0.4, 0.8])
+    lo, hi = microduck_mdp.air_time_window(v, (0.1, 0.4), (0.125, 0.09), (0.30, 0.15))
+    assert torch.allclose(lo, torch.tensor([0.125, 0.125, 0.1075, 0.09, 0.09]))
+    assert torch.allclose(hi, torch.tensor([0.30, 0.30, 0.225, 0.15, 0.15]))
+
+
+def _fake_env(cmd, air=None, vel_b=None, tilted=None):
+    n = cmd.shape[0]
+    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(n, 1)
+    if tilted is not None:
+        s = math.sin(math.radians(60) / 2)
+        quat[tilted] = torch.tensor([math.cos(math.radians(60) / 2), s, 0.0, 0.0])
+    data = SimpleNamespace(
+        root_link_pos_w=torch.tensor([[0.0, 0.0, 0.12]]).repeat(n, 1),
+        root_link_quat_w=quat,
+        root_link_lin_vel_b=vel_b if vel_b is not None else torch.zeros(n, 3),
+    )
+    sensor = SimpleNamespace(data=SimpleNamespace(current_air_time=air if air is not None else torch.zeros(n, 2)))
+
+    class _Scene(dict):
+        terrain = SimpleNamespace(env_origins=torch.zeros(n, 3))
+
+    return SimpleNamespace(
+        scene=_Scene(robot=SimpleNamespace(data=data), feet=sensor),
+        command_manager=SimpleNamespace(get_command=lambda name: cmd),
+        extras={"log": {}},
+    )
+
+
+def test_speed_window_pays_short_swings_only_at_speed():
+    cmd = torch.tensor([[0.1, 0, 0], [0.4, 0, 0], [0.1, 0, 0], [0.4, 0, 0], [0.0, 0, 0], [-0.4, 0, 0], [0.0, 0.3, 0]])
+    air = torch.tensor([
+        [0.25, 0.0],   # slow cmd, long swing → paid (velstand's window)
+        [0.25, 0.0],   # fast cmd, long swing → not paid
+        [0.12, 0.0],   # slow cmd, short swing → not yet paid
+        [0.12, 0.0],   # fast cmd, short swing → paid
+        [0.25, 0.20],  # standing → never paid
+        [0.12, 0.13],  # backward at speed → both feet paid (|vx|)
+        [0.25, 0.0],   # lateral only → slow-end window
+    ])
+    out = microduck_mdp.feet_air_time_speed_window(_fake_env(cmd, air=air), sensor_name="feet", command_name="twist")
+    assert out.tolist() == [1.0, 0.0, 0.0, 1.0, 0.0, 2.0, 1.0]
+
+
+def test_speed_window_zero_while_fallen():
+    cmd = torch.tensor([[0.4, 0, 0], [0.4, 0, 0]])
+    air = torch.tensor([[0.12, 0.12], [0.12, 0.12]])
+    env = _fake_env(cmd, air=air, tilted=torch.tensor([False, True]))
+    out = microduck_mdp.feet_air_time_speed_window(env, sensor_name="feet", command_name="twist")
+    assert out.tolist() == [2.0, 0.0]
+
+
+def test_vx_fine_ignores_sway_and_prices_speed_error():
+    cmd = torch.tensor([[0.4, 0, 0], [0.4, 0, 0], [0.4, 0, 0], [0.4, 0, 0]])
+    vel = torch.tensor([[0.4, 0.0, 0], [0.4, 0.15, 0], [0.18, 0.0, 0], [0.4, 0.0, 0]])
+    env = _fake_env(cmd, vel_b=vel, tilted=torch.tensor([False, False, False, True]))
+    out = microduck_mdp.track_lin_vel_x_fine(env, std=0.15, command_name="twist")
+    assert out[0] == 1.0 and out[1] == 1.0                    # lateral sway is free
+    assert math.isclose(out[2].item(), math.exp(-(0.22 / 0.15) ** 2), rel_tol=1e-5)
+    assert out[3] == 0.0                                      # fallen
+
+
+# ── BC anchor fade ───────────────────────────────────────────────────────────
+
+def test_anchor_vx_fade_weight():
+    obs = torch.zeros(5, 61)
+    obs[:, 48] = torch.tensor([0.0, 0.1, 0.15, -0.2, 0.4])
+    w = anchor_vx_fade_weight(obs, (48, 51), (0.1, 0.2))
+    assert torch.allclose(w, torch.tensor([1.0, 1.0, 0.5, 0.0, 0.0]))
+
+
+class _Actor(torch.nn.Module):
+    obs_groups = ["actor"]
+
+    def __init__(self, bias: float = 0.0, trainable: bool = True):
+        super().__init__()
+        self.lin = torch.nn.Linear(61, 14)
+        torch.nn.init.zeros_(self.lin.weight)
+        torch.nn.init.constant_(self.lin.bias, bias)
+        self.lin.requires_grad_(trainable)
+
+    def forward(self, td):
+        return self.lin(td["actor"])
+
+
+def _bc_algo(vx: torch.Tensor):
+    """PpoWithExpertBc with only the BC pieces: student outputs 0, anchor outputs 1."""
+    n = vx.numel()
+    obs = torch.zeros(n, 1, 61)
+    obs[:, 0, 5] = -1.0            # projected gravity: upright
+    obs[:, 0, 48] = vx
+    algo = PpoWithExpertBc.__new__(PpoWithExpertBc)
+    algo.actor = _Actor()
+    algo.anchor = _Actor(bias=1.0, trainable=False)
+    algo.expert = _Actor(bias=-1.0, trainable=False)
+    algo.device = "cpu"
+    algo.max_grad_norm = 1.0
+    algo.storage = SimpleNamespace(observations=TensorDict({"actor": obs}, batch_size=[n, 1]),
+                                   actions=torch.zeros(n, 1, 14))
+    algo.bc_optimizer = torch.optim.SGD(algo.actor.parameters(), lr=0.0)  # measure the loss, change nothing
+    algo.bc_cfg = {**vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg, "anchor_yaw_remap": None,
+                   "body_slice": None, "min_mini_batch": 1, "epochs": 1, "mini_batches": 1}
+    return algo
+
+
+def test_bc_update_skips_fast_frames_and_fades_mid_frames():
+    lo, hi = vf.ANCHOR_VX_FADE
+    s = _bc_algo(torch.tensor([0.0, lo, 0.5 * (lo + hi), hi, 0.4]))._bc_update()
+    # anchored: 0, lo (w 1) and the midpoint (w 0.5); free: hi and 0.4
+    assert math.isclose(s["expert_bc_anchor_frac"], 3 / 5, rel_tol=1e-6)
+    assert math.isclose(s["expert_bc_vx_free_frac"], 2 / 5, rel_tol=1e-6)
+    assert math.isclose(s["expert_bc"], (1.0 + 1.0 + 0.5) / 3, rel_tol=1e-5)  # MSE 1 per frame × weight
+    s = _bc_algo(torch.tensor([0.3, -0.4]))._bc_update()
+    assert s["expert_bc"] == 0.0 and s["expert_bc_anchor_frac"] == 0.0

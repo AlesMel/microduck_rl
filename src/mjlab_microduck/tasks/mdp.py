@@ -5474,6 +5474,76 @@ def track_yaw_rate_fine(
     return torch.exp(-torch.square(cmd[:, 2] - asset.data.root_link_ang_vel_b[:, 2]) / std**2)
 
 
+# ── VelStandFast: speed-dependent stepping (2026-10-27) ──────────────────────
+
+def air_time_window(
+    speed: torch.Tensor,
+    speed_knots: tuple[float, float],
+    min_knots: tuple[float, float],
+    max_knots: tuple[float, float],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-env air-time window (lo, hi) in s, linear in `speed` between the two knots and
+    clamped outside them."""
+    u = ((speed - speed_knots[0]) / (speed_knots[1] - speed_knots[0])).clamp(0.0, 1.0)
+    lo = min_knots[0] + u * (min_knots[1] - min_knots[0])
+    hi = max_knots[0] + u * (max_knots[1] - max_knots[0])
+    return lo, hi
+
+
+def feet_air_time_speed_window(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    speed_knots: tuple[float, float] = (0.1, 0.4),
+    min_knots: tuple[float, float] = (0.125, 0.09),
+    max_knots: tuple[float, float] = (0.30, 0.15),
+    command_threshold: float = 0.01,
+    gate_tilt_above_deg: float = 40.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """feet_air_time_upright with the window sliding with the commanded |vx|.
+
+    Why (measured 2026-10-27, velstand v8 in its own env): the fixed [0.125, 0.3] s window
+    pays +1/step per foot for the whole part of a swing inside it, so a 0.25 s swing at
+    ~2 Hz collects 1.50/step at weight 3 — more than speed tracking (0.94 at a 0.4 m/s
+    command, achieved 0.18). A real 0.4 m/s gait needs ~0.13 s swings at ~3.5 Hz, which
+    the old window barely pays, so PPO kept the slow walk. Here the window is
+    [0.125, 0.30] s at |vx| ≤ 0.1 (unchanged) and [0.09, 0.15] s at |vx| ≥ 0.4: long swings
+    stop paying at speed. Lateral and turning commands keep the slow-end window. Zeroed
+    while fallen, like feet_air_time_upright."""
+    sensor = env.scene[sensor_name]
+    air = sensor.data.current_air_time
+    cmd = env.command_manager.get_command(command_name)
+    lo, hi = air_time_window(cmd[:, 0].abs(), speed_knots, min_knots, max_knots)
+    in_range = (air > lo.unsqueeze(1)) & (air < hi.unsqueeze(1))
+    reward = in_range.float().sum(dim=1)
+    in_air = (air > 0).float()
+    env.extras["log"]["Metrics/air_time_mean"] = (air * in_air).sum() / in_air.sum().clamp(min=1)
+    total_command = torch.norm(cmd[:, :2], dim=1) + cmd[:, 2].abs()
+    reward = reward * (total_command > command_threshold).float()
+    asset: Entity = env.scene[asset_cfg.name]
+    return reward * (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg))
+
+
+def track_lin_vel_x_fine(
+    env: ManagerBasedRlEnv,
+    std: float,
+    command_name: str,
+    gate_tilt_above_deg: float = 40.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Forward-velocity-only Gaussian, exp(-(vx_cmd - vx)²/std²), ADDED next to the stock
+    track_linear_velocity (kept for its far-error gradient, as with track_yaw_rate_fine).
+
+    Why: the stock term (std 0.316, xy error) still paid 47% for 0.18 m/s at a 0.4
+    command, and the gait's own lateral sway (|vy| ≈ 0.13 m/s) eats into it whatever the
+    forward speed. vx alone prices the escapable error. Zeroed while fallen."""
+    asset: Entity = env.scene[asset_cfg.name]
+    cmd = env.command_manager.get_command(command_name)
+    r = torch.exp(-torch.square(cmd[:, 0] - asset.data.root_link_lin_vel_b[:, 0]) / std**2)
+    return r * (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg))
+
+
 def upright_body_cmd_relative(
     env: ManagerBasedRlEnv,
     std: float,

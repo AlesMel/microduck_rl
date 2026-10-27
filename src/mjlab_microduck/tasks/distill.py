@@ -105,6 +105,13 @@ def default_bc_cfg() -> dict:
         # |wz| knots, "pos"/"neg": fed |wz| per (lin, target)}. A pure function of the obs,
         # so labels stay consistent; zero yaw (standing, straight walking) is unchanged.
         "anchor_yaw_remap": None,
+        # Forward-speed fade (2026-10-27, VelStandFast). The walk anchor's gait is locked at
+        # ~2 Hz with 0.25 s swings and reaches 0.18 m/s at a 0.4 command; coef-1.0 BC copies
+        # that ceiling into every student, whatever the rewards say. (lo, hi) in m/s: the
+        # anchor weight is full at |vx command| ≤ lo, falls linearly to 0 at hi, and frames
+        # above hi are left to PPO. Standing, turning in place and slow walking keep the
+        # anchor. None = off.
+        "anchor_vx_fade": None,
         "body_active_axes": (2, 3, 4),
         "body_no_teacher_axes": (2,),
         # Flat actor-obs columns ZEROED in the stand expert's input on fallen frames (tilt >
@@ -141,6 +148,12 @@ def turn_in_place_mask(obs: torch.Tensor, twist_slice: tuple[int, int], eps: flo
     """Linear command exactly 0 and a non-zero yaw command (command obs carry no noise)."""
     tw = obs[:, twist_slice[0]:twist_slice[1]]
     return (tw[:, :2].abs().amax(dim=1) <= eps) & (tw[:, 2].abs() > eps)
+
+
+def anchor_vx_fade_weight(obs: torch.Tensor, twist_slice: tuple[int, int], fade: tuple[float, float]) -> torch.Tensor:
+    """Walk-anchor weight in [0, 1]: 1 at |vx command| ≤ fade[0], linear to 0 at fade[1]."""
+    vx = obs[:, twist_slice[0]].abs()
+    return ((fade[1] - vx) / (fade[1] - fade[0])).clamp(0.0, 1.0)
 
 
 def body_frame_masks(
@@ -282,9 +295,14 @@ class PpoWithExpertBc(PPO):
         if cfg.get("unanchor_turn_in_place"):
             turn_free = turn_in_place_mask(flat, tuple(cfg["twist_slice"]))
             upright = upright & ~turn_free
+        anchor_w = torch.ones(fallen.shape, device=fallen.device)
+        if cfg.get("anchor_vx_fade") is not None:
+            anchor_w = anchor_vx_fade_weight(flat, tuple(cfg["twist_slice"]), tuple(cfg["anchor_vx_fade"]))
+            upright = upright & (anchor_w > 0)
         stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item(),
                  "expert_bc_body_teach_frac": body_teach.float().mean().item(),
-                 "expert_bc_turn_free_frac": turn_free.float().mean().item()}
+                 "expert_bc_turn_free_frac": turn_free.float().mean().item(),
+                 "expert_bc_vx_free_frac": (anchor_w == 0).float().mean().item()}
         tilted = fallen_mask_from_obs(flat, gsl, cfg.get("expert_mask_tilt_deg", 75.0)) & fallen  # expert_mask_cols rows
         fallen = fallen | body_teach
         if fallen.sum().item() < cfg["min_samples"]:
@@ -298,7 +316,7 @@ class PpoWithExpertBc(PPO):
         fallen = fallen[idx]
         tilted = tilted[idx]
         weight = torch.where(fallen, torch.full_like(fallen, cfg["coef"], dtype=torch.float),
-                             torch.full_like(fallen, cfg.get("anchor_coef", 0.0), dtype=torch.float))
+                             cfg.get("anchor_coef", 0.0) * anchor_w[idx])
         with torch.no_grad():
             target = torch.zeros(idx.numel(), self.storage.actions.shape[-1], device=self.device)
             if fallen.any():
