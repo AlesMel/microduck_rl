@@ -5544,6 +5544,56 @@ def track_lin_vel_x_fine(
     return r * (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg))
 
 
+class track_velocity_ema:
+    """Gaussian tracking of ONE velocity axis on its exponential moving average,
+    exp(-(cmd - ema)²/std²), ema += (dt/tau)·(v - ema), reset to 0 with the episode.
+
+    Why (reward accounting on VelStandFast model_3748, 2026-10-28, true command 0.4, the
+    policy fed bigger commands so it really walks faster): a stepping gait oscillates
+    inside every stride, and instantaneous Gaussians tax that oscillation, not the error
+    the policy can remove. Yaw: drift ≈ 0.06 rad/s but in-stride yaw rate 0.7 → 1.0 rad/s
+    std from 0.25 → 0.33 m/s; the two instantaneous yaw terms paid 1.1 of 4.0 and lost
+    0.27/step going faster. Forward speed: the instantaneous vx Gaussian cannot pay in full
+    even when the stride-mean matches. A 0.5 s EMA (≈ one stride) keeps pricing drift and
+    mean speed and lets the in-stride oscillation cancel (AGENTS.md: price only the
+    escapable part). axis "lin_x" → body vx vs command[0]; "ang_z" → body yaw rate vs
+    command[2] (roll/pitch rates are NOT included, unlike the stock angular term).
+    Optional fallen gate as in feet_air_time_upright."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.ema = torch.zeros(env.num_envs, device=env.device)
+        self.alpha = env.step_dt / cfg.params.get("tau_s", 0.5)
+        assert 0.0 < self.alpha <= 1.0, self.alpha
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std: float,
+        command_name: str,
+        axis: str = "lin_x",
+        tau_s: float = 0.5,
+        gate_tilt_above_deg: float | None = None,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del tau_s  # baked into self.alpha
+        asset: Entity = env.scene[asset_cfg.name]
+        cmd = env.command_manager.get_command(command_name)
+        if axis == "lin_x":
+            v, c = asset.data.root_link_lin_vel_b[:, 0], cmd[:, 0]
+        elif axis == "ang_z":
+            v, c = asset.data.root_link_ang_vel_b[:, 2], cmd[:, 2]
+        else:
+            raise ValueError(f"track_velocity_ema: unknown axis {axis!r}")
+        self.ema += self.alpha * (torch.nan_to_num(v, nan=0.0) - self.ema)
+        r = torch.exp(-torch.square(c - self.ema) / std**2)
+        if gate_tilt_above_deg is not None:
+            r = r * (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg))
+        return r
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        self.ema[slice(None) if env_ids is None else env_ids] = 0.0
+
+
 def upright_body_cmd_relative(
     env: ManagerBasedRlEnv,
     std: float,

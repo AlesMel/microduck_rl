@@ -34,6 +34,9 @@ stay at their final stage — fine-tuning, as for v8b). This task adds no curric
     uv run train Mjlab-VelStandFast-Rough-Backlash-MicroDuck --env.scene.num-envs 4096 \
       --agent.resume True --wandb-run-path pollen-robotics/mjlab_microduck/0045i2si \
       --wandb-checkpoint-name model_2749.pt --agent.max_iterations 1000
+STAGE 2 (2026-10-28): run 1 plateaued at 0.25 m/s for a 0.4 command; see the stage-2 block
+below for the accounting and the three changes (EMA tracking of vx and yaw, vx weight 4, the
+pose running tier). Launched as a plain resume of run 1's model_3748.
 SUCCESS = re-measured with the 2026-10-27 method (scratchpad measure_gait.py): 0.35-0.4 m/s
 achieved at a 0.4 command, stride frequency rising with the command, cmd 0.1 actually
 walks, no regression in falls / get-up. Watch Episode_Reward/air_time not collapsing to 0
@@ -64,6 +67,30 @@ TRACK_VX_FINE_WEIGHT = 2.0
 ENABLE_ANCHOR_VX_FADE = True
 ANCHOR_VX_FADE = (0.1, 0.2)         # anchor weight 1 at |vx| ≤ 0.1 → 0 at ≥ 0.2
 
+# ── Stage 2 (2026-10-28): make going faster actually pay ──────────────────────
+# Run 1 (an5hpzz1 → model_3748, 4 robots/cmd: 0.25 m/s at a 0.4 command) and its 2000-iter
+# continuation (iot15ve7, no gain) plateaued. Counterfactual accounting on model_3748 (fed
+# 0.4/0.5/0.6, scored at a true 0.4, 16 robots): 0.246 → 0.328 m/s earns only +0.20/step —
+# vx_fine +0.67 and track_lin +0.16 are eaten by the yaw terms (−0.27: in-stride yaw-rate
+# oscillation 0.7 → 1.0 rad/s, drift only 0.06), action rate (−0.12), pose (−0.12), upright
+# (−0.08), head (−0.06). The three changes below re-scored on the same rollouts: +1.25.
+ENABLE_EMA_TRACKING = True
+EMA_TAU_S = 0.5                     # ≈ one stride at 2-2.5 Hz
+TRACK_VX_EMA_WEIGHT = 4.0           # was 2 (instantaneous): alone +0.20 → +0.87
+TRACK_YAW_EMA_STDS = {"track_angular_velocity": math.sqrt(0.5), "track_yaw_fine": 0.35}  # same stds/weights as before
+ENABLE_POSE_RUNNING_TIER = True
+# mjlab's variable_posture has a running tier (std_running above running_threshold, in
+# |v_xy| + |wz| command units) but the velocity recipe set it to the walking stds at 1.5,
+# which a ±0.4 m/s command never reaches. Also applies to turning in place ≥ 0.3 rad/s.
+POSE_RUNNING_THRESHOLD = 0.3
+POSE_STD_RUNNING = {
+    r".*hip_yaw.*": 0.3,
+    r".*hip_roll.*": 0.10,
+    r".*hip_pitch.*": 0.6,
+    r".*knee.*": 0.6,
+    r".*ankle.*": 0.4,
+}
+
 
 def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False):
     cfg = make_microduck_velstand_env_cfg(play=play, rough=rough)
@@ -92,6 +119,26 @@ def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False
                 "command_name": cfg.rewards["track_linear_velocity"].params["command_name"],
                 "gate_tilt_above_deg": REWARD_GATE_TILT_DEG,
             },
+        )
+    if ENABLE_EMA_TRACKING:
+        # Same term names as before so wandb curves continue; the functions change.
+        cmd_name = cfg.rewards["track_linear_velocity"].params["command_name"]
+        cfg.rewards["track_vx_fine"] = RewardTermCfg(
+            func=microduck_mdp.track_velocity_ema,
+            weight=TRACK_VX_EMA_WEIGHT,
+            params={"std": TRACK_VX_FINE_STD, "command_name": cmd_name, "axis": "lin_x",
+                    "tau_s": EMA_TAU_S, "gate_tilt_above_deg": REWARD_GATE_TILT_DEG},
+        )
+        for name, std in TRACK_YAW_EMA_STDS.items():
+            # Ungated, like the instantaneous terms they replace (recovery economics unchanged).
+            cfg.rewards[name] = RewardTermCfg(
+                func=microduck_mdp.track_velocity_ema,
+                weight=cfg.rewards[name].weight,
+                params={"std": std, "command_name": cmd_name, "axis": "ang_z", "tau_s": EMA_TAU_S},
+            )
+    if ENABLE_POSE_RUNNING_TIER:
+        cfg.rewards["pose"].params.update(
+            {"running_threshold": POSE_RUNNING_THRESHOLD, "std_running": dict(POSE_STD_RUNNING)}
         )
     return cfg
 

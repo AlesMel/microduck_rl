@@ -41,11 +41,16 @@ def test_only_the_speed_terms_differ_from_velstand(play):
     base = vs.make_microduck_velstand_env_cfg(play=play)
     cfg = vf.make_microduck_velstand_fast_env_cfg(play=play)
     assert set(cfg.rewards) == set(base.rewards) | {"track_vx_fine"}
+    changed = {"air_time"}
+    if vf.ENABLE_EMA_TRACKING:
+        changed |= set(vf.TRACK_YAW_EMA_STDS)
     for name in base.rewards:
-        if name == "air_time":
+        if name in changed:
             continue
         assert cfg.rewards[name].func is base.rewards[name].func, name
         assert cfg.rewards[name].weight == base.rewards[name].weight, name
+        if name != "pose" or not vf.ENABLE_POSE_RUNNING_TIER:
+            assert cfg.rewards[name].params == base.rewards[name].params, name
     assert set(cfg.curriculum) == set(base.curriculum)        # no new curricula: plain resume from v8
     assert cfg.commands["twist"].ranges == base.commands["twist"].ranges
     assert cfg.observations["actor"].terms.keys() == base.observations["actor"].terms.keys()
@@ -70,9 +75,42 @@ def test_vx_fine_term_wired():
     cfg = vf.make_microduck_velstand_fast_env_cfg()
     base = vs.make_microduck_velstand_env_cfg()
     f = cfg.rewards["track_vx_fine"]
-    assert f.func is microduck_mdp.track_lin_vel_x_fine and f.weight > 0
+    if vf.ENABLE_EMA_TRACKING:
+        assert f.func is microduck_mdp.track_velocity_ema and f.weight == vf.TRACK_VX_EMA_WEIGHT > vf.TRACK_VX_FINE_WEIGHT
+        assert f.params["axis"] == "lin_x" and f.params["tau_s"] == vf.EMA_TAU_S
+        assert f.params["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
+    else:
+        assert f.func is microduck_mdp.track_lin_vel_x_fine and f.weight > 0
     assert f.params["std"] < base.rewards["track_linear_velocity"].params["std"]
     assert cfg.rewards["track_linear_velocity"].params == base.rewards["track_linear_velocity"].params
+
+
+def test_yaw_terms_on_ema():
+    if not vf.ENABLE_EMA_TRACKING:
+        return
+    cfg = vf.make_microduck_velstand_fast_env_cfg()
+    base = vs.make_microduck_velstand_env_cfg()
+    for name in ("track_angular_velocity", "track_yaw_fine"):
+        t = cfg.rewards[name]
+        assert t.func is microduck_mdp.track_velocity_ema and t.params["axis"] == "ang_z", name
+        assert t.weight == base.rewards[name].weight > 0, name          # same weight as the term it replaces
+        assert math.isclose(t.params["std"], base.rewards[name].params["std"]), name
+        assert t.params.get("gate_tilt_above_deg") is None, name         # ungated, like before (recovery untouched)
+
+
+def test_pose_running_tier():
+    pose = vf.make_microduck_velstand_fast_env_cfg().rewards["pose"]
+    base = vs.make_microduck_velstand_env_cfg().rewards["pose"]
+    if not vf.ENABLE_POSE_RUNNING_TIER:
+        assert pose.params == base.params
+        return
+    p = pose.params
+    # reachable: the twist command tops out at 0.4 m/s; walking tier stays below the threshold
+    assert p["walking_threshold"] < p["running_threshold"] < max(vs.make_microduck_velstand_env_cfg().commands["twist"].ranges.lin_vel_x)
+    assert set(p["std_running"]) == set(p["std_walking"])
+    for k, std in p["std_running"].items():
+        assert std >= p["std_walking"][k], k                              # only ever looser than walking
+    assert p["std_standing"] == base.params["std_standing"] and p["std_walking"] == base.params["std_walking"]
 
 
 def test_anchor_fade_only_in_fast_runner_cfg():
@@ -150,6 +188,50 @@ def test_vx_fine_ignores_sway_and_prices_speed_error():
     assert out[0] == 1.0 and out[1] == 1.0                    # lateral sway is free
     assert math.isclose(out[2].item(), math.exp(-(0.22 / 0.15) ** 2), rel_tol=1e-5)
     assert out[3] == 0.0                                      # fallen
+
+
+def _ema_term(n, std=0.15, tau_s=0.5, **params):
+    term_cfg = SimpleNamespace(params={"std": std, "command_name": "twist", "tau_s": tau_s, **params})
+    return microduck_mdp.track_velocity_ema(term_cfg, SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02))
+
+
+def test_velocity_ema_converges_on_the_mean_and_cancels_oscillation():
+    cmd = torch.tensor([[0.4, 0, 0], [0.4, 0, 0]])
+    term = _ema_term(2, axis="lin_x")
+    vel = torch.zeros(2, 3)
+    env = _fake_env(cmd, vel_b=vel)
+    ema_out, inst_out = [], []
+    for k in range(200):  # 4 s at 50 Hz: env 0 holds 0.4; env 1 averages 0.4 with ±0.15 at 2.5 Hz
+        vel[0, 0] = 0.4
+        vel[1, 0] = 0.4 + 0.15 * math.sin(2 * math.pi * 2.5 * k * 0.02)
+        ema_out.append(term(env, std=0.15, command_name="twist", axis="lin_x"))
+        inst_out.append(math.exp(-((0.4 - vel[1, 0].item()) ** 2) / 0.15 ** 2))
+    last = torch.stack(ema_out[-20:])                                      # the last stride (0.4 s)
+    assert last[:, 0].min() > 0.99
+    assert last[:, 1].mean() > 0.9 > 0.7 > sum(inst_out[-20:]) / 20       # the EMA pays the mean; instantaneous does not
+
+
+def test_velocity_ema_yaw_axis_ignores_roll_pitch_and_resets():
+    cmd = torch.tensor([[0.0, 0, 0.5], [0.0, 0, 0.5]])
+    term = _ema_term(2, std=0.35, axis="ang_z")
+    env = _fake_env(cmd)
+    ang = torch.tensor([[0.0, 0.0, 0.5], [2.0, 2.0, 0.5]])              # env 1 rocks hard in roll/pitch
+    env.scene["robot"].data.root_link_ang_vel_b = ang
+    for _ in range(150):
+        out = term(env, std=0.35, command_name="twist", axis="ang_z")
+    assert torch.allclose(out[0], out[1]) and out[0] > 0.99
+    term.reset(env_ids=torch.tensor([1]))
+    assert term.ema[1] == 0.0 and term.ema[0] > 0.49
+    term.reset(None)
+    assert (term.ema == 0).all()
+
+
+def test_velocity_ema_fallen_gate():
+    cmd = torch.tensor([[0.0, 0, 0], [0.0, 0, 0]])
+    term = _ema_term(2, axis="lin_x", gate_tilt_above_deg=40.0)
+    env = _fake_env(cmd, tilted=torch.tensor([False, True]))
+    out = term(env, std=0.15, command_name="twist", axis="lin_x", gate_tilt_above_deg=40.0)
+    assert out.tolist() == [1.0, 0.0]
 
 
 # ── BC anchor fade ───────────────────────────────────────────────────────────
