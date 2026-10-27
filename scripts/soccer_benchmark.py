@@ -27,6 +27,7 @@ from mjlab_microduck.soccer.oracle import Oracle
 
 TASK = "Mjlab-Soccer-1v1-MicroDuck"
 GOALWARD = 0.3  # m/s toward the attacked goal, 0.6 s after a kick fired
+CONVERT_S = 4.0  # a goalward kick counts as converted if blue scores within this after it
 
 
 def _checkpoint_policy(env, path: str, device: str):
@@ -72,19 +73,27 @@ def main() -> None:
     for term in (blue_term, red_term):
         term.kicks_fired.zero_()
         term.kicks_cancelled.zero_()
+        term.kicks_contested.zero_()
     match_stats(raw).take()
     pending = torch.full((args.envs,), -1, dtype=torch.long, device=args.device)
     goalward = kicks_seen = 0
+    # Goalward kicks still inside their conversion window.
+    window = torch.zeros(args.envs, dtype=torch.long, device=args.device)
+    converted = 0
     obs = env.get_observations()
     with torch.inference_mode():
         for _ in range(round(args.seconds / raw.step_dt)):
             obs, *_ = env.step(blue(obs))
+            stats = match_stats(raw)
+            converted += int((stats.blue_scored & (window > 0)).sum())
+            window = torch.where(stats.blue_scored | stats.red_scored, torch.zeros_like(window), (window - 1).clamp(min=0))
             pending = torch.where(blue_term.fired_now, torch.full_like(pending, 6), pending - 1)
             due = pending == 0
             if due.any():
-                speed = ball_to_goal_speed(raw, team=1, max_speed=5.0)[due]
-                goalward += int((speed > GOALWARD).sum())
+                good = due & (ball_to_goal_speed(raw, team=1, max_speed=5.0) > GOALWARD)
+                goalward += int(good.sum())
                 kicks_seen += int(due.sum())
+                window = torch.where(good, torch.full_like(window, round(CONVERT_S / raw.step_dt)), window)
 
     by_possession = match_stats(raw).take_scenarios()
     blue_goals, red_goals, draws = match_stats(raw).take()
@@ -94,6 +103,8 @@ def main() -> None:
           f"red {red_goals:.0f} ({per(red_goals):.2f}/point), draws {draws:.0f}")
     print(f"  blue kicks fired {float(blue_term.kicks_fired):.0f}, cancelled {float(blue_term.kicks_cancelled):.0f}, "
           f"goalward {goalward}/{kicks_seen} ({goalward / max(1, kicks_seen):.0%}); red kicks fired {float(red_term.kicks_fired):.0f}")
+    print(f"  blue cancelled because red was at the ball {float(blue_term.kicks_contested):.0f}; goalward kicks scored "
+          f"{converted}/{goalward} ({converted / max(1, goalward):.0%}) within {CONVERT_S:.0f} s")
     if "kickoff_kicker_goals" in by_possession:
         print(f"  by possession: the side kicking off scored {by_possession['kickoff_kicker_goals']:.2f}/point, "
               f"the other side {by_possession['kickoff_defender_goals']:.2f}/point")
