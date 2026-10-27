@@ -4,25 +4,25 @@
   <worldbody>
     <geom name="wall_left" size="1.75 0.025 0.075" pos="0 1.025 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
     <geom name="wall_right" size="1.75 0.025 0.075" pos="0 -1.025 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
-    <geom name="wall_end_blue_left" size="0.025 0.35 0.075" pos="-1.525 0.65 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
-    <geom name="wall_end_blue_right" size="0.025 0.35 0.075" pos="-1.525 -0.65 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
-    <geom name="goal_blue_post_left" size="0.015 0.015 0.125" pos="-1.5 0.315 0.125" type="box" rgba="0.2 0.4 1 1"/>
-    <geom name="goal_blue_net_left" size="0.1 0.0075 0.125" pos="-1.6 0.315 0.125" type="box" rgba="1 1 1 0.35"/>
-    <geom name="goal_blue_post_right" size="0.015 0.015 0.125" pos="-1.5 -0.315 0.125" type="box" rgba="0.2 0.4 1 1"/>
-    <geom name="goal_blue_net_right" size="0.1 0.0075 0.125" pos="-1.6 -0.315 0.125" type="box" rgba="1 1 1 0.35"/>
-    <geom name="goal_blue_bar" size="0.015 0.33 0.015" pos="-1.5 0 0.265" type="box" rgba="0.2 0.4 1 1"/>
-    <geom name="goal_blue_net_back" size="0.025 0.33 0.125" pos="-1.725 0 0.125" type="box" rgba="1 1 1 0.35"/>
-    <geom name="goal_blue_net_top" size="0.1 0.33 0.0075" pos="-1.6 0 0.265" type="box" rgba="1 1 1 0.35"/>
+    <geom name="wall_end_blue_left" size="0.025 0.2 0.075" pos="-1.525 0.8 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
+    <geom name="wall_end_blue_right" size="0.025 0.2 0.075" pos="-1.525 -0.8 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
+    <geom name="goal_blue_post_left" size="0.015 0.015 0.125" pos="-1.5 0.615 0.125" type="box" rgba="0.2 0.4 1 1"/>
+    <geom name="goal_blue_net_left" size="0.1 0.0075 0.125" pos="-1.6 0.615 0.125" type="box" rgba="1 1 1 0.35"/>
+    <geom name="goal_blue_post_right" size="0.015 0.015 0.125" pos="-1.5 -0.615 0.125" type="box" rgba="0.2 0.4 1 1"/>
+    <geom name="goal_blue_net_right" size="0.1 0.0075 0.125" pos="-1.6 -0.615 0.125" type="box" rgba="1 1 1 0.35"/>
+    <geom name="goal_blue_bar" size="0.015 0.63 0.015" pos="-1.5 0 0.265" type="box" rgba="0.2 0.4 1 1"/>
+    <geom name="goal_blue_net_back" size="0.025 0.63 0.125" pos="-1.725 0 0.125" type="box" rgba="1 1 1 0.35"/>
+    <geom name="goal_blue_net_top" size="0.1 0.63 0.0075" pos="-1.6 0 0.265" type="box" rgba="1 1 1 0.35"/>
     <geom name="line_goal_blue" size="0.01 1 0.001" pos="-1.5 0 0.001" type="box" contype="0" conaffinity="0" group="1" rgba="1 1 1 1"/>
-    <geom name="wall_end_red_left" size="0.025 0.35 0.075" pos="1.525 0.65 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
-    <geom name="wall_end_red_right" size="0.025 0.35 0.075" pos="1.525 -0.65 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
-    <geom name="goal_red_post_left" size="0.015 0.015 0.125" pos="1.5 0.315 0.125" type="box" rgba="1 0.25 0.2 1"/>
-    <geom name="goal_red_net_left" size="0.1 0.0075 0.125" pos="1.6 0.315 0.125" type="box" rgba="1 1 1 0.35"/>
-    <geom name="goal_red_post_right" size="0.015 0.015 0.125" pos="1.5 -0.315 0.125" type="box" rgba="1 0.25 0.2 1"/>
-    <geom name="goal_red_net_right" size="0.1 0.0075 0.125" pos="1.6 -0.315 0.125" type="box" rgba="1 1 1 0.35"/>
-    <geom name="goal_red_bar" size="0.015 0.33 0.015" pos="1.5 0 0.265" type="box" rgba="1 0.25 0.2 1"/>
-    <geom name="goal_red_net_back" size="0.025 0.33 0.125" pos="1.725 0 0.125" type="box" rgba="1 1 1 0.35"/>
-    <geom name="goal_red_net_top" size="0.1 0.33 0.0075" pos="1.6 0 0.265" type="box" rgba="1 1 1 0.35"/>
+    <geom name="wall_end_red_left" size="0.025 0.2 0.075" pos="1.525 0.8 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
+    <geom name="wall_end_red_right" size="0.025 0.2 0.075" pos="1.525 -0.8 0.075" type="box" rgba="0.85 0.85 0.9 1"/>
+    <geom name="goal_red_post_left" size="0.015 0.015 0.125" pos="1.5 0.615 0.125" type="box" rgba="1 0.25 0.2 1"/>
+    <geom name="goal_red_net_left" size="0.1 0.0075 0.125" pos="1.6 0.615 0.125" type="box" rgba="1 1 1 0.35"/>
+    <geom name="goal_red_post_right" size="0.015 0.015 0.125" pos="1.5 -0.615 0.125" type="box" rgba="1 0.25 0.2 1"/>
+    <geom name="goal_red_net_right" size="0.1 0.0075 0.125" pos="1.6 -0.615 0.125" type="box" rgba="1 1 1 0.35"/>
+    <geom name="goal_red_bar" size="0.015 0.63 0.015" pos="1.5 0 0.265" type="box" rgba="1 0.25 0.2 1"/>
+    <geom name="goal_red_net_back" size="0.025 0.63 0.125" pos="1.725 0 0.125" type="box" rgba="1 1 1 0.35"/>
+    <geom name="goal_red_net_top" size="0.1 0.63 0.0075" pos="1.6 0 0.265" type="box" rgba="1 1 1 0.35"/>
     <geom name="line_goal_red" size="0.01 1 0.001" pos="1.5 0 0.001" type="box" contype="0" conaffinity="0" group="1" rgba="1 1 1 1"/>
     <geom name="corner_blue_right" size="0.156066 0.025 0.075" pos="-1.44268 -0.942678 0.075" quat="0.382683 0 0 0.92388" type="box" rgba="0.85 0.85 0.9 1"/>
     <geom name="corner_blue_left" size="0.156066 0.025 0.075" pos="-1.44268 0.942678 0.075" quat="0.382683 0 0 -0.92388" type="box" rgba="0.85 0.85 0.9 1"/>

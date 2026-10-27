@@ -12,6 +12,12 @@ all measured 2026-10-26:
   face the goal, and triggers.
 
 Attack: go round the ball to the spot behind it on the ball -> goal line, face the goal, trigger.
+The goal point is the middle of the goal, unless the opponent stands between the ball and the
+goal: then it is `AIM_Y` toward the post away from them. A defender holding the shot line ~0.55 m
+ahead of the ball stops nearly every shot at its middle (the trained policy blocked 96% of the
+oracle's on-target shots at the 0.6 m goal, the ball meeting its front between the feet), so the
+goal is 1.2 m wide (`field.Field`) and the oracle shoots inside the open post: 57% of its goalward
+kicks then scored against that same defender.
 Dribble: with the opponent at the ball (`contested`) the routine won't run, so from anywhere
 behind the ball the oracle walks it toward the goal at full speed instead — which also makes it
 the tackle: the defender is goal-side, so it pushes the ball away from its own goal.
@@ -39,6 +45,8 @@ ARRIVE = 0.06  # close enough to a target point to stop walking
 TURN_IN_PLACE = 0.6  # rad of heading error above which the oracle stops and turns
 AIM_TOL = 0.12  # rad: aimed well enough to trigger
 GUARD_DIST = 0.35  # defending: this far from the ball toward its own goal
+AIM_Y = FIELD.goal_width / 2 - 0.15  # shooting past a defender: this far from the goal's centre toward the open post
+SIDE_HYSTERESIS = 0.04  # m of the defender's offset from the shot line before the aim switches post
 DRIBBLE_BEHIND = 0.05  # dribbling: walk at a point this far behind the ball on its push line
 ESCAPE_ANGLE = 0.9  # rad: with the opponent in front of the ball, push it this far round them
 BLOCK_WIDTH = 0.2  # opponent within this of the ball -> goal line counts as in front of the ball
@@ -61,6 +69,7 @@ class Oracle:
         self.skill = torch.as_tensor(skill, dtype=torch.float, device=env.device).expand(n).clone()
         self.last = torch.zeros(n, 4, device=env.device)
         self.last[:, 3] = -1.0
+        self.post = torch.ones(n, device=env.device)  # which post to aim inside, +y or -y, when blocked
 
     def __call__(self, obs: torch.Tensor | None = None) -> torch.Tensor:
         fresh = self.decide()
@@ -75,8 +84,18 @@ class Oracle:
         opp = _local(env, self.opp)[:, :2]
         ball = _local(env, BALL)[:, :2]
         yaw = _yaw(env.scene[self.me].data.root_link_quat_w)
-        goal = ball.new_tensor((team * FIELD.half_length, 0.0))
-        own_goal = -goal
+        centre = ball.new_tensor((team * FIELD.half_length, 0.0))
+        own_goal = -centre
+        to_centre = _unit(centre - ball)
+        # Shoot past the opponent when they stand between the ball and the goal: inside the post
+        # on the far side from them. The post only switches once they are clearly across the line,
+        # or the aim (and the whole approach) would flicker as they shuffle.
+        opp_rel = opp - ball
+        across = (opp_rel * torch.stack((-to_centre[:, 1], to_centre[:, 0]), -1)).sum(-1)
+        in_way = (opp_rel * to_centre).sum(-1) > 0
+        # Rebound, not in place: the teacher's oracle can be built inside the rollout's inference_mode.
+        self.post = torch.where(across > SIDE_HYSTERESIS, -1.0, torch.where(across < -SIDE_HYSTERESIS, 1.0, self.post))
+        goal = centre + torch.stack((torch.zeros_like(across), self.post * AIM_Y * in_way), -1)
         aim = _unit(goal - ball)
         perp = torch.stack((-aim[:, 1], aim[:, 0]), -1)
 
@@ -102,7 +121,6 @@ class Oracle:
         # it diagonally round the opponent's side away from them.
         dribble = contested(ball, opp) & ((rel * aim).sum(-1) < 0)
         defend = defend & ~dribble
-        opp_rel = opp - ball
         lateral = (opp_rel * perp).sum(-1)
         blocked = ((opp_rel * aim).sum(-1) > 0) & (lateral.abs() < BLOCK_WIDTH)
         away = torch.where(lateral > 0, -1.0, 1.0) * ESCAPE_ANGLE * blocked

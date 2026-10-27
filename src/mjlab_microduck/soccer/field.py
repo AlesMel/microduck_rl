@@ -25,7 +25,10 @@ class Field:
     width: float = 2.0  # touchline to touchline (y)
     wall_height: float = 0.15
     wall_thickness: float = 0.05
-    goal_width: float = 0.6  # between the posts (y)
+    # Between the posts (y). 0.6 m was a goal one duck could shut: standing on the shot line ~0.55 m
+    # ahead of the ball it shadows +-10 degrees, and from the centre spot that goal spans +-11. At
+    # 1.2 m the oracle's goalward kicks past the trained defender scored 57% (12% at 0.6 m).
+    goal_width: float = 1.2
     goal_height: float = 0.25  # crossbar, from the floor
     goal_depth: float = 0.2  # behind the goal line (x)
     post_radius: float = 0.015
