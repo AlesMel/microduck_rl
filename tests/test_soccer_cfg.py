@@ -220,3 +220,17 @@ def test_ball_out():
     outside = torch.tensor([[0.0, FIELD.half_width + 0.3, 0.1], [0.0, 0.0, -1.0]])
     assert not soccer_mdp.ball_out(inside).any()
     assert soccer_mdp.ball_out(outside).all()
+
+
+def test_training_randomizes_the_ball_and_the_view_but_not_the_critic():
+    from mjlab_microduck.tasks.microduck_soccer_env_cfg import OBS_LAG_STEPS, OBS_NOISE
+
+    train = make_microduck_soccer_env_cfg()
+    assert {"ball_mass", "ball_friction"} <= set(train.events)
+    for group in ("actor", "opponent"):
+        term = train.observations[group].terms["match"]
+        assert term.params["noise"] == OBS_NOISE and (term.delay_min_lag, term.delay_max_lag) == OBS_LAG_STEPS
+    critic = train.observations["critic"].terms["match"]
+    assert "noise" not in critic.params and critic.delay_max_lag == 0
+    play = make_microduck_soccer_env_cfg(play=True)
+    assert "ball_mass" not in play.events and "noise" not in play.observations["actor"].terms["match"].params

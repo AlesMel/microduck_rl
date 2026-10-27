@@ -194,23 +194,56 @@ def _local(env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
     return env.scene[name].data.root_link_pos_w - env.scene.env_origins
 
 
-def match_obs(env: ManagerBasedRlEnv, team: int) -> torch.Tensor:
-    """`side_obs` for blue (team=+1) or red (team=-1), read from the scene."""
+def _yaw_jitter(quat_wxyz: torch.Tensor, std: float) -> torch.Tensor:
+    """`quat_wxyz` turned about world z by N(0, std) rad."""
+    half = torch.randn(quat_wxyz.shape[0], device=quat_wxyz.device) * std / 2
+    w, x, y, z = quat_wxyz.unbind(-1)
+    c, s = torch.cos(half), torch.sin(half)
+    return torch.stack((c * w - s * z, c * x - s * y, c * y + s * x, c * z + s * w), -1)
+
+
+def match_obs(env: ManagerBasedRlEnv, team: int, noise: dict[str, float] | None = None) -> torch.Tensor:
+    """`side_obs` for blue (team=+1) or red (team=-1), read from the scene.
+
+    `noise`: per-quantity Gaussian std, applied to the world state before it is framed, so all
+    27 values stay consistent with one (wrong) estimate of where everything is — as a camera and
+    a localiser would get it wrong. Keys: own_pos, own_yaw, own_vel, ball_pos, ball_vel, opp_pos,
+    opp_yaw, opp_vel (metres, radians, m/s). Positions and velocities are planar.
+    """
     own, opp = (BLUE, RED) if team > 0 else (RED, BLUE)
     own_d, opp_d, ball_d = env.scene[own].data, env.scene[opp].data, env.scene[BALL].data
     time_left = 1.0 - env.episode_length_buf.float() / env.max_episode_length
+    own_pos, own_quat, own_vel = _local(env, own), own_d.root_link_quat_w, own_d.root_link_lin_vel_w
+    opp_pos, opp_quat, opp_vel = _local(env, opp), opp_d.root_link_quat_w, opp_d.root_link_lin_vel_w
+    ball_pos, ball_vel = _local(env, BALL), ball_d.root_link_lin_vel_w
+    if noise:
+        def planar(v: torch.Tensor, key: str) -> torch.Tensor:
+            std = noise.get(key, 0.0)
+            if std <= 0.0:
+                return v
+            jitter = torch.zeros_like(v)
+            jitter[:, :2] = torch.randn_like(v[:, :2]) * std
+            return v + jitter
+
+        own_pos, own_vel = planar(own_pos, "own_pos"), planar(own_vel, "own_vel")
+        opp_pos, opp_vel = planar(opp_pos, "opp_pos"), planar(opp_vel, "opp_vel")
+        ball_pos, ball_vel = planar(ball_pos, "ball_pos"), planar(ball_vel, "ball_vel")
+        if noise.get("own_yaw", 0.0) > 0.0:
+            own_quat = _yaw_jitter(own_quat, noise["own_yaw"])
+        if noise.get("opp_yaw", 0.0) > 0.0:
+            opp_quat = _yaw_jitter(opp_quat, noise["opp_yaw"])
     return side_obs(
-        _local(env, own),
-        own_d.root_link_quat_w,
-        own_d.root_link_lin_vel_w,
+        own_pos,
+        own_quat,
+        own_vel,
         own_d.root_link_ang_vel_w[:, 2],
         own_d.projected_gravity_b[:, 2],
-        _local(env, opp),
-        opp_d.root_link_quat_w,
-        opp_d.root_link_lin_vel_w,
+        opp_pos,
+        opp_quat,
+        opp_vel,
         opp_d.projected_gravity_b[:, 2],
-        _local(env, BALL),
-        ball_d.root_link_lin_vel_w,
+        ball_pos,
+        ball_vel,
         time_left,
         env.action_manager.get_term(ACTION_TERMS[team]).kick_fraction,
         team,

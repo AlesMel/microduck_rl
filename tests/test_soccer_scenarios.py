@@ -42,15 +42,17 @@ def test_kickoff_is_the_match():
         kicker = torch.full((N,), team)
         lay = sample(torch.full((N,), KICKOFF, dtype=torch.long), generator=torch.Generator().manual_seed(0), kicker=kicker)
         assert (lay.blue_xy[:, 0] < 0).all() and (lay.red_xy[:, 0] > 0).all()
-        assert (lay.ball_xy.norm(dim=-1) < 0.08).all()
+        assert (lay.ball_xy.abs() <= 0.15 + 1e-6).all()
         kick_xy, kick_yaw, def_xy = (lay.blue_xy, lay.blue_yaw, lay.red_xy) if team > 0 else (lay.red_xy, lay.red_yaw, lay.blue_xy)
         to_ball = (lay.ball_xy - kick_xy).norm(dim=-1)
-        assert torch.allclose(to_ball, torch.full((N,), KICKER_BALL_DIST), atol=0.01)
-        # Facing the goal it attacks (+x for blue, -x for red), so the ball is dead ahead.
-        assert (_angle_to(lay.ball_xy, kick_xy, kick_yaw).abs() < 0.2).all()
-        assert (torch.cos(kick_yaw) * team > 0.95).all()
+        assert ((to_ball > KICKER_BALL_DIST - 0.06) & (to_ball < KICKER_BALL_DIST + 0.11)).all()
+        # Facing the goal it attacks (+x for blue, -x for red) within ±25°, the ball dead ahead.
+        assert (_angle_to(lay.ball_xy, kick_xy, kick_yaw).abs() < 0.05).all()
+        assert (torch.cos(kick_yaw) * team > math.cos(0.46)).all()
         assert torch.allclose(def_xy[:, 0].abs().mean(), torch.tensor(DEFENDER_X), atol=0.02)
-        assert ((def_xy - lay.ball_xy).norm(dim=-1) > 0.75).all()
+        assert ((def_xy - lay.ball_xy).norm(dim=-1) > 0.45).all()
+        # Not one kickoff: the spread is real.
+        assert lay.ball_xy.std(0).min() > 0.07 and kick_yaw.std() > 0.2
 
 
 def test_shoot_puts_the_ball_at_blues_foot_facing_goal():

@@ -25,15 +25,18 @@ a policy robotd loads into a slot, and it must not be published as one.
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
+from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.events import reset_scene_to_default
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg
 from mjlab.scene import SceneCfg
@@ -85,6 +88,35 @@ SHAPING_GATE = {
 SCENARIO_PROBS = (0.5, 0.2, 0.15, 0.15)
 NUM_STEPS_PER_ENV = 24
 
+# ── the ball, and how much of it (and of what the policy sees) is randomized ──
+# The ball's own contact parameters, nominal. `ball.xml` leaves it on condim 3, where MuJoCo
+# ignores rolling friction: a ball rolled at 1 m/s was still doing 0.998 m/s after 2 s. Condim 6
+# with rolling 1e-3 slows it to 0.78 m/s over 2 s (measured 2026-10-27), a hard floor's worth.
+# Priority 2 makes these the contact's values against the floor and the feet (priority 1), which
+# otherwise win with their own friction of 1.0.
+BALL_CONDIM = 6
+BALL_PRIORITY = 2
+BALL_FRICTION = (0.7, 0.005, 1.0e-3)  # sliding, torsional, rolling
+# Training only (`add_domain_randomization`); play and the renders keep the nominal ball and clean
+# observations.
+ENABLE_DOMAIN_RANDOMIZATION = True
+BALL_MASS_SCALE = (0.7, 1.5)  # 10.5-22.5 g around the 15 g ball; mass and inertia together
+BALL_SLIDING_FRICTION = (0.4, 1.0)
+# Rolled at 1 m/s: 3e-4 barely slows it (0.97 m/s after 2 s), 2.5e-3 more than halves its speed
+# by 2 s — from a polished floor to a short carpet.
+BALL_ROLLING_FRICTION = (3.0e-4, 2.5e-3)
+# What a head camera and a localiser would get wrong, per decision: Gaussian std in metres,
+# radians and m/s, applied to the world state before it is framed (`soccer_mdp.match_obs`).
+OBS_NOISE = {
+    "own_pos": 0.03, "own_yaw": 0.05, "own_vel": 0.05,
+    "ball_pos": 0.03, "ball_vel": 0.10,
+    "opp_pos": 0.04, "opp_yaw": 0.15, "opp_vel": 0.10,
+}
+# Latency of the whole match observation, in decisions (0.1 s each): 0-200 ms, held from one
+# decision to the next 90% of the time, as a camera pipeline's delay drifts rather than jumps.
+OBS_LAG_STEPS = (0, 2)
+OBS_LAG_HOLD = 0.9
+
 
 def _placed(spec_fn, root_body: str, pos, quat):
     """`spec_fn` with its root body moved to the kickoff pose.
@@ -113,20 +145,66 @@ def _robot(x: float, yaw_quat: tuple[float, float, float, float]):
     )
 
 
+def _rolling(spec_fn):
+    """`spec_fn` with the ball's contact parameters set to `BALL_CONDIM` / `BALL_FRICTION`."""
+
+    def build():
+        spec = spec_fn()
+        geom = spec.geom("ball_geom")
+        geom.condim, geom.priority, geom.friction = BALL_CONDIM, BALL_PRIORITY, list(BALL_FRICTION)
+        return spec
+
+    return build
+
+
 def _ball():
     pos = (0.0, 0.0, BALL_RADIUS)
     return replace(
         MICRODUCK_BALL_CFG,
-        spec_fn=_placed(MICRODUCK_BALL_CFG.spec_fn, "ball", pos, (1.0, 0.0, 0.0, 0.0)),
+        spec_fn=_rolling(_placed(MICRODUCK_BALL_CFG.spec_fn, "ball", pos, (1.0, 0.0, 0.0, 0.0))),
         init_state=replace(MICRODUCK_BALL_CFG.init_state, pos=pos),
     )
 
 
+def add_domain_randomization(cfg: ManagerBasedRlEnvCfg) -> None:
+    """Randomize the ball and corrupt what the policy sees. Training gets this; the benchmark can
+    ask for it (`--dr`) to measure what it costs.
+
+    The ball: mass and inertia once per env (a `set_const` recompute, too heavy per reset), its
+    sliding and rolling friction every point. The observation: `OBS_NOISE` and `OBS_LAG_STEPS` on
+    the actor's and the opponent's views, the opponent's so a snapshot plays under the same
+    conditions it was trained in. The critic and the teacher keep the true state.
+    """
+    lo, hi = BALL_MASS_SCALE
+    cfg.events["ball_mass"] = EventTermCfg(
+        func=dr.pseudo_inertia,
+        mode="startup",
+        params={"asset_cfg": SceneEntityCfg(BALL), "alpha_range": (math.log(lo) / 2.0, math.log(hi) / 2.0)},
+    )
+    cfg.events["ball_friction"] = EventTermCfg(
+        func=dr.geom_friction,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg(BALL, geom_names=("ball_geom",)),
+            "ranges": {0: BALL_SLIDING_FRICTION, 2: BALL_ROLLING_FRICTION},
+            "axes": [0, 2],
+            "operation": "abs",
+        },
+    )
+    for group in ("actor", "opponent"):
+        term = cfg.observations[group].terms["match"]
+        term.params["noise"] = dict(OBS_NOISE)
+        term.delay_min_lag, term.delay_max_lag = OBS_LAG_STEPS
+        term.delay_hold_prob = OBS_LAG_HOLD
+
+
 def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-    match = {"match": ObservationTermCfg(func=soccer_mdp.match_obs, params={"team": 1})}
+    # A term cfg per group: domain randomization corrupts the actor's view and must not reach the
+    # critic's through a shared object.
+    match = lambda: {"match": ObservationTermCfg(func=soccer_mdp.match_obs, params={"team": 1})}
     observations = {
-        "actor": ObservationGroupCfg(terms=dict(match)),
-        "critic": ObservationGroupCfg(terms=dict(match)),
+        "actor": ObservationGroupCfg(terms=match()),
+        "critic": ObservationGroupCfg(terms=match()),
         # Red's view, same layout as the actor's: what the self-play snapshot is fed.
         "opponent": ObservationGroupCfg(
             terms={"match": ObservationTermCfg(func=soccer_mdp.match_obs, params={"team": -1})}
@@ -201,6 +279,8 @@ def make_microduck_soccer_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
     )
 
+    if ENABLE_DOMAIN_RANDOMIZATION and not play:
+        add_domain_randomization(cfg)
     if play:
         cfg.scene.num_envs = 1
         # Matches only, and no shaping: play (and the 50 fps renders) should show the game itself.

@@ -24,6 +24,7 @@ from mjlab_microduck.soccer.mdp import (
     BLUE, OPP_ORACLE, OPP_SNAPSHOT, OPP_STATUE, RED, ball_to_goal_speed, match_stats, opponent_kind,
 )
 from mjlab_microduck.soccer.oracle import Oracle
+from mjlab_microduck.tasks.microduck_soccer_env_cfg import add_domain_randomization
 
 TASK = "Mjlab-Soccer-1v1-MicroDuck"
 GOALWARD = 0.3  # m/s toward the attacked goal, 0.6 s after a kick fired
@@ -44,9 +45,13 @@ def main() -> None:
     parser.add_argument("--envs", type=int, default=32)
     parser.add_argument("--seconds", type=float, default=90.0, help="of play per env, points back to back")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--dr", action="store_true",
+                        help="training's domain randomization: random balls, noisy and late observations")
     args = parser.parse_args()
 
     cfg = load_env_cfg(TASK, play=True)
+    if args.dr:
+        add_domain_randomization(cfg)
     cfg.scene.num_envs = args.envs
     env = RslRlVecEnvWrapper(ManagerBasedRlEnv(cfg, device=args.device))
     raw = env.unwrapped

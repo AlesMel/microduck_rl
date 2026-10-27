@@ -91,19 +91,22 @@ def sample(kinds: torch.Tensor, generator: torch.Generator | None = None, kicker
     red_goal = torch.tensor([FIELD.half_length, 0.0], device=dev)
     blue_goal = -red_goal
 
-    # KICKOFF — the kicker behind the ball facing the goal it attacks within ±10°, the defender
-    # back in its own half (±0.1/±0.3 m), facing the ball within ±20°.
+    # KICKOFF — the ball near the centre spot; the kicker behind it at about KICKER_BALL_DIST,
+    # facing the goal it attacks within ±25°; the defender back in its own half, facing the ball
+    # within ±45°. Every range here is wide enough that no two kickoffs look alike: at ±5 cm and
+    # ±10° they did.
     if kicker is None:
         kicker = torch.ones(n, device=dev)
     blue_kicks = (kicker > 0).unsqueeze(-1)
-    k_ball = _xy(u(-0.05, 0.05), u(-0.05, 0.05))
-    k_kick_yaw = u(-0.17, 0.17)
+    k_ball = _xy(u(-0.15, 0.15), u(-0.15, 0.15))
+    k_kick_yaw = u(-0.45, 0.45)
     k_kick_dir = _xy(torch.cos(k_kick_yaw), torch.sin(k_kick_yaw))
-    k_def = _xy(DEFENDER_X + u(-0.1, 0.1), u(-0.3, 0.3))
-    k_blue = torch.where(blue_kicks, k_ball - k_kick_dir * KICKER_BALL_DIST, -k_def)
-    k_red = torch.where(blue_kicks, k_def, k_ball + k_kick_dir * KICKER_BALL_DIST)
-    k_blue_yaw = torch.where(blue_kicks[:, 0], k_kick_yaw, _heading(k_ball, k_blue) + u(-0.35, 0.35))
-    k_red_yaw = torch.where(blue_kicks[:, 0], _heading(k_ball, k_red) + u(-0.35, 0.35), torch.pi + k_kick_yaw)
+    k_kick_dist = (KICKER_BALL_DIST + u(-0.05, 0.1)).unsqueeze(-1)
+    k_def = _xy(DEFENDER_X + u(-0.2, 0.2), u(-0.5, 0.5))
+    k_blue = torch.where(blue_kicks, k_ball - k_kick_dir * k_kick_dist, -k_def)
+    k_red = torch.where(blue_kicks, k_def, k_ball + k_kick_dir * k_kick_dist)
+    k_blue_yaw = torch.where(blue_kicks[:, 0], k_kick_yaw, _heading(k_ball, k_blue) + u(-0.8, 0.8))
+    k_red_yaw = torch.where(blue_kicks[:, 0], _heading(k_ball, k_red) + u(-0.8, 0.8), torch.pi + k_kick_yaw)
 
     # SHOOT — ball at blue's foot, blue aimed at the red goal within ±15°.
     s_ball = _xy(u(-0.2, FIELD.half_length - 0.4), u(-0.6, 0.6))
