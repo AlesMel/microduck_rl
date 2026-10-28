@@ -125,6 +125,10 @@ LOW_SWING_MIN_APEX = 0.010          # m; the never-fell robots' p10 apex is 14 m
 # A full scuff (apex 0) costs ≈ a quarter-second of speed tracking at speed: (track_vx_fine
 # ≈ 3.4 + track_linear_velocity ≈ 1.3)/step × 12.5 steps ≈ 60. A 2 mm scuff: 0.64 × 60 ≈ 38.
 LOW_SWING_WEIGHT = -60.0
+# Charged by forward speed only: 0 at |vx| ≤ 0.15 → full at ≥ 0.3. Unscaled, model_5746 on
+# rough paid −1.35/step at 0.1 m/s (≈ what standing still would save → the 0.1 dead zone
+# again), −0.81 sideways, −0.48 turning at 0.5 rad/s, vs −0.38/−0.41 at 0.3/0.4.
+LOW_SWING_VX_RAMP = (0.15, 0.30)
 VX_TEACHER_COEF_RAMP = (VX_TEACHER_COEF, 0.25, 400)   # (start, end, iters of this run)
 
 
@@ -188,6 +192,7 @@ def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False
                 "min_apex": LOW_SWING_MIN_APEX,
                 "command_threshold": sw["command_threshold"],
                 "gate_tilt_above_deg": REWARD_GATE_TILT_DEG,
+                "vx_ramp": LOW_SWING_VX_RAMP,
             },
         )
     return cfg

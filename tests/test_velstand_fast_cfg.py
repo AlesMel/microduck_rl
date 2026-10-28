@@ -417,3 +417,23 @@ def test_vx_teacher_coef_ramp():
     assert [round(c, 4) for c in coefs] == [1.0, 0.8125, 0.625, 0.4375, 0.25, 0.25]
     algo.bc_cfg["vx_teacher_coef_ramp"] = None
     assert algo._vx_teacher_coef() == 1.0
+
+
+def test_low_swing_cost_scales_with_forward_speed_only():
+    cmd = torch.tensor([[0.1, 0, 0], [0.225, 0, 0], [0.4, 0, 0], [0.0, 0.3, 0], [0.0, 0, 1.0]])
+    n = cmd.shape[0]
+    term = microduck_mdp.feet_low_swing_cost(SimpleNamespace(params={}), SimpleNamespace(num_envs=n, device="cpu"))
+    env = _swing_env(cmd, torch.ones(n, 2), torch.zeros(n, 2))
+    out = []
+    for c, h in (([[0, 1]] * n, [[0.0, 0]] * n), ([[1, 1]] * n, [[0, 0]] * n)):   # a zero-clearance scuff, then land
+        env.scene["feet"].data.found = torch.tensor(c, dtype=torch.float32)
+        env.scene["scan"].data.heights = torch.tensor(h)
+        out.append(term(env, sensor_name="feet", height_sensor_name="scan", command_name="twist",
+                        min_apex=0.010, vx_ramp=(0.15, 0.30)))
+    assert torch.allclose(out[1], torch.tensor([0.0, 0.5, 1.0, 0.0, 0.0]))   # slow, sideways and turning: free
+
+
+def test_low_swing_uses_the_vx_ramp():
+    if vf.ENABLE_LOW_SWING_COST:
+        lo, hi = vf.make_microduck_velstand_fast_env_cfg().rewards["low_swing"].params["vx_ramp"]
+        assert 0.1 < lo < hi <= 0.4

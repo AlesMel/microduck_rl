@@ -5606,7 +5606,12 @@ class feet_low_swing_cost:
     (apex/target − 1)² × 0.25 per landing, so a 2 mm scuff cost 0.2 and a 38 mm step the
     same. This charges only swings below min_apex; high steps are free. Zero while
     standing (|command| ≤ threshold) and while fallen (tilt > gate) — get-up flailing is
-    not a gait."""
+    not a gait.
+
+    ``vx_ramp`` (lo, hi): scale by clamp((|vx command| − lo)/(hi − lo), 0, 1). Trips are a
+    speed problem (v8 shuffles at 0.1-0.2 m/s and does not fall); unscaled at weight −60 the
+    measured cost on model_5746 was −1.35/step at 0.1 m/s — about what standing still would
+    save — and −0.81 sideways, vs −0.41 at 0.4."""
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         n_feet = 2
@@ -5622,6 +5627,7 @@ class feet_low_swing_cost:
         min_apex: float = 0.010,
         command_threshold: float = 0.01,
         gate_tilt_above_deg: float = 40.0,
+        vx_ramp: tuple[float, float] | None = None,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         contact = env.scene[sensor_name].data.found > 0
@@ -5637,7 +5643,10 @@ class feet_low_swing_cost:
         walking = (torch.norm(cmd[:, :2], dim=1) + cmd[:, 2].abs()) > command_threshold
         asset: Entity = env.scene[asset_cfg.name]
         upright = 1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
-        return cost * walking.float() * upright
+        scale = walking.float() * upright
+        if vx_ramp is not None:
+            scale = scale * ((cmd[:, 0].abs() - vx_ramp[0]) / (vx_ramp[1] - vx_ramp[0])).clamp(0.0, 1.0)
+        return cost * scale
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         ids = slice(None) if env_ids is None else env_ids
