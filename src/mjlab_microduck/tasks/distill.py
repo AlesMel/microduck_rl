@@ -112,6 +112,18 @@ def default_bc_cfg() -> dict:
         # above hi are left to PPO. Standing, turning in place and slow walking keep the
         # anchor. None = off.
         "anchor_vx_fade": None,
+        # Forward-speed teacher (2026-10-28, VelStandFast stage 3). After stage 2 the reward
+        # paid for speed (a 0.4 command: +0.63/step for 0.40 vs the policy's 0.27 m/s) and the
+        # policy ran 0.395 m/s when FED 0.6, but 1000 PPO iterations never moved the 0.4
+        # behaviour there. Same fix as anchor_yaw_remap: a frozen teacher is fed the command
+        # that makes IT achieve the student's commanded |vx| (table calibrated on the teacher,
+        # sign kept, 0 → 0), and teaches the forward frames the walk anchor fades out of:
+        # weight vx_teacher_coef · (1 − anchor fade weight). Requires anchor_vx_fade.
+        "vx_teacher_checkpoint_path": None,
+        "vx_teacher_wandb_run_path": None,
+        "vx_teacher_checkpoint_name": None,
+        "vx_teacher_coef": 0.0,
+        "vx_teacher_remap": None,   # {"targets": |vx| knots, "fed": fed |vx| per knot}, both increasing
         "body_active_axes": (2, 3, 4),
         "body_no_teacher_axes": (2,),
         # Flat actor-obs columns ZEROED in the stand expert's input on fallen frames (tilt >
@@ -219,6 +231,20 @@ def remap_anchor_yaw(obs: torch.Tensor, twist_slice: tuple[int, int], table: dic
     return out
 
 
+def remap_vx(obs: torch.Tensor, twist_slice: tuple[int, int], table: dict) -> torch.Tensor:
+    """Copy of the flat obs with the forward command replaced by the one the vx teacher needs
+    to actually reach it: piecewise linear in |vx| through (0, 0) and the table knots,
+    clamped at the last knot, sign kept."""
+    out = obs.clone()
+    vx = obs[:, twist_slice[0]]
+    dev, dt = obs.device, obs.dtype
+    tk = torch.as_tensor([0.0, *table["targets"]], dtype=dt, device=dev)
+    fk = torch.as_tensor([0.0, *table["fed"]], dtype=dt, device=dev)
+    fed = _interp_rows(vx.abs(), tk, fk.expand(vx.numel(), -1))
+    out[:, twist_slice[0]] = torch.sign(vx) * fed
+    return out
+
+
 def _with_flat(td: TensorDict, groups: list[str], flat: torch.Tensor) -> TensorDict:
     """Rebuild the obs groups of ``td`` from a modified flat obs."""
     off = 0
@@ -258,6 +284,7 @@ class PpoWithExpertBc(PPO):
         self.bc_cfg = bc_cfg
         self.expert = None
         self.anchor = None
+        self.vx_teacher = None
         if bc_cfg:
             ckpt = torch.load(_resolve_checkpoint(bc_cfg), map_location=self.device, weights_only=False)
             self.expert = load_expert_from(self.actor, ckpt["actor_state_dict"]).to(self.device)
@@ -265,6 +292,14 @@ class PpoWithExpertBc(PPO):
             if anchor_path is not None:
                 ack = torch.load(anchor_path, map_location=self.device, weights_only=False)
                 self.anchor = load_expert_from(self.actor, ack["actor_state_dict"]).to(self.device)
+            if bc_cfg.get("vx_teacher_coef", 0.0) > 0:
+                assert bc_cfg.get("anchor_vx_fade") is not None and bc_cfg.get("vx_teacher_remap"), \
+                    "vx teacher needs anchor_vx_fade (its frame weights) and vx_teacher_remap"
+                vx_path = _resolve_checkpoint(bc_cfg, "vx_teacher_")
+                assert vx_path is not None, "vx_teacher_coef > 0 but no vx_teacher_checkpoint_path / wandb run"
+                vck = torch.load(vx_path, map_location=self.device, weights_only=False)
+                self.vx_teacher = load_expert_from(self.actor, vck["actor_state_dict"]).to(self.device)
+                print(f"[distill] vx teacher ON: {vx_path} coef={bc_cfg['vx_teacher_coef']} remap {bc_cfg['vx_teacher_remap']}")
             # Own optimizer: PPO's adaptive-KL schedule and shared Adam moments
             # would otherwise throttle/mix the BC step (first path check: 4 BC
             # steps through the PPO optimizer lost to 20 PPO steps per iteration).
@@ -307,32 +342,53 @@ class PpoWithExpertBc(PPO):
         fallen = fallen | body_teach
         if fallen.sum().item() < cfg["min_samples"]:
             fallen = torch.zeros_like(fallen)  # too few fallen frames: anchor-only pass (or nothing)
+        # vx teacher: upright forward frames, the share the walk anchor fades out of.
+        vx_frames = torch.zeros_like(fallen)
+        if self.vx_teacher is not None:
+            vx_frames = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) & (anchor_w < 1)
+        stats["expert_bc_vx_teacher_frac"] = vx_frames.float().mean().item()
         use = fallen | upright
         idx = use.nonzero().flatten()
-        if idx.numel() == 0:
+        vx_idx = vx_frames.nonzero().flatten()
+        if idx.numel() == 0 and vx_idx.numel() == 0:
             stats["expert_bc"] = 0.0
             return stats
-        obs_td = obs_td[idx]
-        fallen = fallen[idx]
-        tilted = tilted[idx]
-        weight = torch.where(fallen, torch.full_like(fallen, cfg["coef"], dtype=torch.float),
-                             cfg.get("anchor_coef", 0.0) * anchor_w[idx])
+        parts_td, parts_target, parts_weight = [], [], []
         with torch.no_grad():
-            target = torch.zeros(idx.numel(), self.storage.actions.shape[-1], device=self.device)
-            if fallen.any():
-                exp_td = obs_td[fallen].clone()
-                exp_flat = expert_input(torch.cat([exp_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
-                                        tuple(cfg.get("expert_mask_cols", ())), tilted[fallen])
-                target[fallen] = self.expert(_with_flat(exp_td, groups, exp_flat))
-            if (~fallen).any():
-                anc_td = obs_td[~fallen]
-                if cfg.get("anchor_yaw_remap"):
-                    anc_td = anc_td.clone()
-                    anc_flat = remap_anchor_yaw(torch.cat([anc_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
-                                                cfg["anchor_yaw_remap"])
-                    anc_td = _with_flat(anc_td, groups, anc_flat)
-                target[~fallen] = self.anchor(anc_td)
-        n = idx.numel()
+            if idx.numel():
+                sub_td = obs_td[idx]
+                sub_fallen = fallen[idx]
+                sub_tilted = tilted[idx]
+                parts_weight.append(torch.where(sub_fallen, torch.full_like(sub_fallen, cfg["coef"], dtype=torch.float),
+                                                cfg.get("anchor_coef", 0.0) * anchor_w[idx]))
+                target = torch.zeros(idx.numel(), self.storage.actions.shape[-1], device=self.device)
+                if sub_fallen.any():
+                    exp_td = sub_td[sub_fallen].clone()
+                    exp_flat = expert_input(torch.cat([exp_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
+                                            tuple(cfg.get("expert_mask_cols", ())), sub_tilted[sub_fallen])
+                    target[sub_fallen] = self.expert(_with_flat(exp_td, groups, exp_flat))
+                if (~sub_fallen).any():
+                    anc_td = sub_td[~sub_fallen]
+                    if cfg.get("anchor_yaw_remap"):
+                        anc_td = anc_td.clone()
+                        anc_flat = remap_anchor_yaw(torch.cat([anc_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
+                                                    cfg["anchor_yaw_remap"])
+                        anc_td = _with_flat(anc_td, groups, anc_flat)
+                    target[~sub_fallen] = self.anchor(anc_td)
+                parts_td.append(sub_td)
+                parts_target.append(target)
+            if vx_idx.numel():
+                sub_td = obs_td[vx_idx]
+                vx_td = sub_td.clone()
+                vx_flat = remap_vx(torch.cat([vx_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
+                                   cfg["vx_teacher_remap"])
+                parts_td.append(sub_td)
+                parts_target.append(self.vx_teacher(_with_flat(vx_td, groups, vx_flat)))
+                parts_weight.append(cfg["vx_teacher_coef"] * (1.0 - anchor_w[vx_idx]))
+        obs_td = torch.cat(parts_td) if len(parts_td) > 1 else parts_td[0]
+        target = torch.cat(parts_target)
+        weight = torch.cat(parts_weight)
+        n = target.shape[0]
         mb = max(cfg.get("min_mini_batch", 1), n // cfg["mini_batches"])
         total = 0.0
         steps = 0

@@ -37,6 +37,9 @@ stay at their final stage — fine-tuning, as for v8b). This task adds no curric
 STAGE 2 (2026-10-28): run 1 plateaued at 0.25 m/s for a 0.4 command; see the stage-2 block
 below for the accounting and the three changes (EMA tracking of vx and yaw, vx weight 4, the
 pose running tier). Launched as a plain resume of run 1's model_3748.
+STAGE 3 (2026-10-28): stage 2 fixed the reward but not the gait; a frozen model_4747 fed a
+calibrated larger vx command teaches the forward frames (see the stage-3 block). Plain resume
+of stage 2's model_4747.
 SUCCESS = re-measured with the 2026-10-27 method (scratchpad measure_gait.py): 0.35-0.4 m/s
 achieved at a 0.4 command, stride frequency rising with the command, cmd 0.1 actually
 walks, no regression in falls / get-up. Watch Episode_Reward/air_time not collapsing to 0
@@ -89,6 +92,24 @@ POSE_STD_RUNNING = {
     r".*hip_pitch.*": 0.6,
     r".*knee.*": 0.6,
     r".*ankle.*": 0.4,
+}
+
+# ── Stage 3 (2026-10-28): teach the faster gait the policy already has ─────────
+# Stage 2 (pf256qqb → model_4747) fixed the reward — at a true 0.4 command, fed 0.4/0.5/0.6
+# scored 11.45/11.93/12.07 for 0.27/0.34/0.40 m/s, no falls — but did not move the 0.4
+# behaviour (4 robots: 0.229 m/s). A frozen copy of model_4747 is the BC teacher for
+# forward frames, fed the command that makes IT reach the commanded speed (distill
+# remap_vx). Calibrated on model_4747 (claude scratchpad calib_vx.py, flat + backlash, 16
+# robots per fed command, 4 s settle, mean body vx): fed 0.10/0.15/0.20/0.25/0.30/0.35/0.40/
+# 0.50/0.60/0.70/0.80/0.90 → 0.009/0.053/0.124/0.158/0.198/0.243/0.268/0.357/0.428/0.448/
+# 0.483/0.500 m/s (± 0.02-0.06 across robots, all upright up to 0.8, 15/16 at 0.9).
+ENABLE_VX_TEACHER = True
+VX_TEACHER_COEF = 1.0               # same as the walk anchor it takes over from
+VX_TEACHER_WANDB_RUN = "alesmelichar-slovak-university-of-technology-in-bratislava/mjlab_microduck/pf256qqb"
+VX_TEACHER_CHECKPOINT = "model_4747.pt"
+VX_TEACHER_REMAP = {                # inverse of the curve above at the trained command range
+    "targets": [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40],
+    "fed": [0.183, 0.238, 0.302, 0.364, 0.436, 0.492, 0.561],
 }
 
 
@@ -149,6 +170,14 @@ MicroduckVelStandFastRlCfg.run_name = "velstand_fast"
 MicroduckVelStandFastRlCfg.max_iterations = 1_000
 if ENABLE_ANCHOR_VX_FADE and MicroduckVelStandFastRlCfg.algorithm.bc_cfg is not None:
     MicroduckVelStandFastRlCfg.algorithm.bc_cfg["anchor_vx_fade"] = ANCHOR_VX_FADE
+if ENABLE_VX_TEACHER and MicroduckVelStandFastRlCfg.algorithm.bc_cfg is not None:
+    assert ENABLE_ANCHOR_VX_FADE, "the vx teacher takes the frame share the anchor fades out of"
+    MicroduckVelStandFastRlCfg.algorithm.bc_cfg.update({
+        "vx_teacher_coef": VX_TEACHER_COEF,
+        "vx_teacher_wandb_run_path": VX_TEACHER_WANDB_RUN,
+        "vx_teacher_checkpoint_name": VX_TEACHER_CHECKPOINT,
+        "vx_teacher_remap": VX_TEACHER_REMAP,
+    })
 
 assert math.isclose(AIR_MIN_KNOTS[0], 0.125) and math.isclose(AIR_MAX_KNOTS[0], 0.30), \
     "slow end must match velstand's window so the slow walk / turning are unchanged"

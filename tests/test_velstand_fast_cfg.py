@@ -120,8 +120,9 @@ def test_anchor_fade_only_in_fast_runner_cfg():
     lo, hi = vf.ANCHOR_VX_FADE
     assert vf.AIR_SPEED_KNOTS[0] <= lo < hi < vf.AIR_SPEED_KNOTS[1]
     # everything else about the BC is velstand's
-    assert {k: v for k, v in fast.items() if k != "anchor_vx_fade"} == \
-           {k: v for k, v in vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.items() if k != "anchor_vx_fade"}
+    ours = lambda k: k == "anchor_vx_fade" or k.startswith("vx_teacher_")  # noqa: E731
+    assert {k: v for k, v in fast.items() if not ours(k)} == \
+           {k: v for k, v in vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.items() if not ours(k)}
     assert vf.MicroduckVelStandFastRlCfg.experiment_name != vs.MicroduckVelStandRlCfg.experiment_name
 
 
@@ -267,6 +268,7 @@ def _bc_algo(vx: torch.Tensor):
     algo.actor = _Actor()
     algo.anchor = _Actor(bias=1.0, trainable=False)
     algo.expert = _Actor(bias=-1.0, trainable=False)
+    algo.vx_teacher = None
     algo.device = "cpu"
     algo.max_grad_norm = 1.0
     algo.storage = SimpleNamespace(observations=TensorDict({"actor": obs}, batch_size=[n, 1]),
@@ -286,3 +288,64 @@ def test_bc_update_skips_fast_frames_and_fades_mid_frames():
     assert math.isclose(s["expert_bc"], (1.0 + 1.0 + 0.5) / 3, rel_tol=1e-5)  # MSE 1 per frame × weight
     s = _bc_algo(torch.tensor([0.3, -0.4]))._bc_update()
     assert s["expert_bc"] == 0.0 and s["expert_bc_anchor_frac"] == 0.0
+
+
+# ── BC vx teacher (stage 3) ──────────────────────────────────────────────────
+
+def test_remap_vx_table_lookup():
+    from mjlab_microduck.tasks.distill import remap_vx
+    obs = torch.zeros(6, 61)
+    obs[:, 48] = torch.tensor([0.0, 0.1, 0.3, -0.4, 0.6, 0.2])
+    obs[:, 49] = 0.1; obs[:, 50] = -0.5; obs[:, 0] = 7.0
+    out = remap_vx(obs, (48, 51), {"targets": [0.2, 0.4], "fed": [0.3, 0.6]})
+    assert torch.allclose(out[:, 48], torch.tensor([0.0, 0.15, 0.45, -0.6, 0.6, 0.3]))  # 0→0, linear, sign kept, clamped
+    assert (out[:, 49:] == obs[:, 49:]).all() and (out[:, :48] == obs[:, :48]).all()  # only vx changes
+    assert obs[1, 48] == 0.1                                                         # input untouched
+
+
+class _EchoVx(torch.nn.Module):
+    """Teacher whose every action equals the vx command it is fed."""
+    obs_groups = ["actor"]
+
+    def forward(self, td):
+        return td["actor"][:, 48:49].expand(-1, 14)
+
+
+def test_bc_update_vx_teacher_takes_the_faded_share():
+    lo, hi = vf.ANCHOR_VX_FADE
+    mid = 0.5 * (lo + hi)
+    algo = _bc_algo(torch.tensor([0.0, mid, 0.3]))
+    algo.vx_teacher = _EchoVx()
+    algo.bc_cfg = {**algo.bc_cfg, "vx_teacher_coef": 1.0, "vx_teacher_remap": {"targets": [0.4], "fed": [0.8]}}  # fed = 2·vx
+    s = algo._bc_update()
+    # anchor (target 1): vx 0 at w 1, mid at w 0.5; teacher (target 2·vx): mid at w 0.5, 0.3 at w 1
+    expected = (1.0 + 0.5 * 1.0 + 0.5 * (2 * mid) ** 2 + 1.0 * 0.6 ** 2) / 4
+    assert math.isclose(s["expert_bc"], expected, rel_tol=1e-5)
+    assert math.isclose(s["expert_bc_vx_teacher_frac"], 2 / 3, rel_tol=1e-6)
+
+
+def test_bc_update_vx_teacher_skips_fallen_frames():
+    algo = _bc_algo(torch.tensor([0.3, 0.3]))
+    algo.storage.observations["actor"][1, 0, 3:6] = torch.tensor([0.0, -1.0, 0.0])  # lying on its side
+    algo.vx_teacher = _EchoVx()
+    algo.bc_cfg = {**algo.bc_cfg, "vx_teacher_coef": 1.0, "vx_teacher_remap": {"targets": [0.4], "fed": [0.8]}, "min_samples": 10}
+    s = algo._bc_update()
+    assert math.isclose(s["expert_bc_vx_teacher_frac"], 1 / 2, rel_tol=1e-6)
+    assert math.isclose(s["expert_bc"], 0.6 ** 2, rel_tol=1e-5)
+
+
+def test_vx_teacher_wired():
+    bc = vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg
+    if not vf.ENABLE_VX_TEACHER:
+        assert not bc.get("vx_teacher_coef")
+        return
+    assert bc["vx_teacher_coef"] > 0 and bc["anchor_vx_fade"] == vf.ANCHOR_VX_FADE
+    assert bc["vx_teacher_wandb_run_path"] and bc["vx_teacher_checkpoint_name"].endswith(".pt")
+    t = bc["vx_teacher_remap"]
+    assert len(t["targets"]) == len(t["fed"])
+    assert list(t["targets"]) == sorted(t["targets"]) and list(t["fed"]) == sorted(t["fed"])  # monotone
+    assert all(f > x for x, f in zip(t["targets"], t["fed"]))       # the teacher undershoots → always fed more
+    assert t["targets"][0] <= vf.ANCHOR_VX_FADE[0]                  # covers the whole faded band
+    lin_x = vf.make_microduck_velstand_fast_env_cfg().commands["twist"].ranges.lin_vel_x
+    assert t["targets"][-1] >= max(abs(v) for v in lin_x)           # and the whole trained command range
+    assert vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.get("vx_teacher_coef", 0.0) == 0.0  # velstand untouched
