@@ -124,6 +124,13 @@ def default_bc_cfg() -> dict:
         "vx_teacher_checkpoint_name": None,
         "vx_teacher_coef": 0.0,
         "vx_teacher_remap": None,   # {"targets": |vx| knots, "fed": fed |vx| per knot}, both increasing
+        # (start, end, iters): vx_teacher_coef moves linearly from start to end over the first
+        # `iters` BC updates of THIS run (one per PPO iteration), then holds `end`. None = the
+        # constant vx_teacher_coef. Stage 4 (2026-10-28): once the student has the speed, the
+        # flat-calibrated teacher mostly pins its rough-terrain trip rate (student 12.5 % ≈
+        # teacher 6-16 % falls in 20 s at 0.4 m/s); easing it lets PPO trade a little speed
+        # for footing.
+        "vx_teacher_coef_ramp": None,
         "body_active_axes": (2, 3, 4),
         "body_no_teacher_axes": (2,),
         # Flat actor-obs columns ZEROED in the stand expert's input on fallen frames (tilt >
@@ -285,6 +292,7 @@ class PpoWithExpertBc(PPO):
         self.expert = None
         self.anchor = None
         self.vx_teacher = None
+        self._bc_updates = 0
         if bc_cfg:
             ckpt = torch.load(_resolve_checkpoint(bc_cfg), map_location=self.device, weights_only=False)
             self.expert = load_expert_from(self.actor, ckpt["actor_state_dict"]).to(self.device)
@@ -312,7 +320,20 @@ class PpoWithExpertBc(PPO):
 
     # ── BC pass ───────────────────────────────────────────────────────────────
 
+    def _vx_teacher_coef(self) -> float:
+        ramp = self.bc_cfg.get("vx_teacher_coef_ramp")
+        if not ramp:
+            return self.bc_cfg.get("vx_teacher_coef", 0.0)
+        start, end, iters = ramp
+        u = min(getattr(self, "_bc_updates", 0) / max(iters, 1), 1.0)
+        return start + u * (end - start)
+
     def _bc_update(self) -> dict[str, float]:
+        stats = self._bc_update_inner()
+        self._bc_updates = getattr(self, "_bc_updates", 0) + 1
+        return stats
+
+    def _bc_update_inner(self) -> dict[str, float]:
         cfg = self.bc_cfg
         obs_td: TensorDict = self.storage.observations.flatten(0, 1)  # (T*N, ...)
         groups = list(self.actor.obs_groups)
@@ -347,6 +368,8 @@ class PpoWithExpertBc(PPO):
         if self.vx_teacher is not None:
             vx_frames = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) & (anchor_w < 1)
         stats["expert_bc_vx_teacher_frac"] = vx_frames.float().mean().item()
+        vx_coef = self._vx_teacher_coef()
+        stats["expert_bc_vx_teacher_coef"] = vx_coef
         use = fallen | upright
         idx = use.nonzero().flatten()
         vx_idx = vx_frames.nonzero().flatten()
@@ -384,7 +407,7 @@ class PpoWithExpertBc(PPO):
                                    cfg["vx_teacher_remap"])
                 parts_td.append(sub_td)
                 parts_target.append(self.vx_teacher(_with_flat(vx_td, groups, vx_flat)))
-                parts_weight.append(cfg["vx_teacher_coef"] * (1.0 - anchor_w[vx_idx]))
+                parts_weight.append(vx_coef * (1.0 - anchor_w[vx_idx]))
         obs_td = torch.cat(parts_td) if len(parts_td) > 1 else parts_td[0]
         target = torch.cat(parts_target)
         weight = torch.cat(parts_weight)

@@ -40,7 +40,7 @@ def test_backlash_variant_uses_velstand_model():
 def test_only_the_speed_terms_differ_from_velstand(play):
     base = vs.make_microduck_velstand_env_cfg(play=play)
     cfg = vf.make_microduck_velstand_fast_env_cfg(play=play)
-    assert set(cfg.rewards) == set(base.rewards) | {"track_vx_fine"}
+    assert set(cfg.rewards) == set(base.rewards) | {"track_vx_fine"} | ({"low_swing"} if vf.ENABLE_LOW_SWING_COST else set())
     changed = {"air_time"}
     if vf.ENABLE_EMA_TRACKING:
         changed |= set(vf.TRACK_YAW_EMA_STDS)
@@ -349,3 +349,71 @@ def test_vx_teacher_wired():
     lin_x = vf.make_microduck_velstand_fast_env_cfg().commands["twist"].ranges.lin_vel_x
     assert t["targets"][-1] >= max(abs(v) for v in lin_x)           # and the whole trained command range
     assert vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.get("vx_teacher_coef", 0.0) == 0.0  # velstand untouched
+
+
+# ── Stage 4: low-swing landing cost + vx-teacher ramp ────────────────────────
+
+def _swing_env(cmd, contact, heights, tilted=None):
+    env = _fake_env(cmd, tilted=tilted)
+    env.scene["feet"] = SimpleNamespace(data=SimpleNamespace(found=contact))
+    env.scene["scan"] = SimpleNamespace(data=SimpleNamespace(heights=heights))
+    return env
+
+
+def _swing(term, env, contact_seq, height_seq):
+    out = []
+    for c, h in zip(contact_seq, height_seq):
+        env.scene["feet"].data.found = torch.tensor(c)
+        env.scene["scan"].data.heights = torch.tensor(h)
+        out.append(term(env, sensor_name="feet", height_sensor_name="scan", command_name="twist", min_apex=0.010))
+    return torch.stack(out)
+
+
+def test_low_swing_cost_charges_only_low_swings_at_landing():
+    n = 2
+    cmd = torch.tensor([[0.4, 0, 0]] * n)
+    term = microduck_mdp.feet_low_swing_cost(SimpleNamespace(params={}), SimpleNamespace(num_envs=n, device="cpu"))
+    env = _swing_env(cmd, torch.ones(n, 2), torch.zeros(n, 2))
+    # left foot swings: env 0 peaks at 25 mm (fine), env 1 at 2 mm (a scuff); right foot stays down
+    contact = [[[1, 1], [1, 1]], [[0, 1], [0, 1]], [[0, 1], [0, 1]], [[1, 1], [1, 1]], [[1, 1], [1, 1]]]
+    height = [[[0, 0], [0, 0]], [[0.010, 0], [0.001, 0]], [[0.025, 0], [0.002, 0]], [[0, 0], [0, 0]], [[0, 0], [0, 0]]]
+    out = _swing(term, env, contact, height)
+    assert out[:, 0].abs().sum() == 0                                   # high swing: free
+    assert out[:3, 1].abs().sum() == 0 and math.isclose(out[3, 1].item(), 0.64, rel_tol=1e-5)  # charged once, at landing
+    assert out[4, 1] == 0                                               # not charged again
+    assert (out >= 0).all()                                              # cost → negative weight
+
+
+def test_low_swing_cost_free_while_standing_or_fallen():
+    cmd = torch.tensor([[0.0, 0, 0], [0.4, 0, 0]])
+    term = microduck_mdp.feet_low_swing_cost(SimpleNamespace(params={}), SimpleNamespace(num_envs=2, device="cpu"))
+    env = _swing_env(cmd, torch.ones(2, 2), torch.zeros(2, 2), tilted=torch.tensor([False, True]))
+    out = _swing(term, env, [[[0, 1]] * 2, [[1, 1]] * 2], [[[0.001, 0]] * 2, [[0, 0]] * 2])
+    assert out.abs().sum() == 0                                          # env 0 standing, env 1 fallen
+    term.reset(None)
+    assert (term.peak == 0).all() and term.prev_contact.all()
+
+
+def test_low_swing_wired():
+    cfg = vf.make_microduck_velstand_fast_env_cfg()
+    if not vf.ENABLE_LOW_SWING_COST:
+        assert "low_swing" not in cfg.rewards
+        return
+    t = cfg.rewards["low_swing"]
+    assert t.func is microduck_mdp.feet_low_swing_cost and t.weight < 0      # ≥ 0 cost → negative weight
+    assert 0 < t.params["min_apex"] < cfg.rewards["foot_swing_height"].params["target_height"]
+    assert t.params["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
+    bc = vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg
+    start, end, iters = bc["vx_teacher_coef_ramp"]
+    assert start == bc["vx_teacher_coef"] > end > 0 and iters > 0
+
+
+def test_vx_teacher_coef_ramp():
+    algo = _bc_algo(torch.tensor([0.3]))
+    algo.vx_teacher = _EchoVx()
+    algo.bc_cfg = {**algo.bc_cfg, "vx_teacher_coef": 1.0, "vx_teacher_remap": {"targets": [0.4], "fed": [0.8]},
+                   "vx_teacher_coef_ramp": (1.0, 0.25, 4)}
+    coefs = [algo._bc_update()["expert_bc_vx_teacher_coef"] for _ in range(6)]
+    assert [round(c, 4) for c in coefs] == [1.0, 0.8125, 0.625, 0.4375, 0.25, 0.25]
+    algo.bc_cfg["vx_teacher_coef_ramp"] = None
+    assert algo._vx_teacher_coef() == 1.0

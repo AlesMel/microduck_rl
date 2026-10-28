@@ -5594,6 +5594,57 @@ class track_velocity_ema:
         self.ema[slice(None) if env_ids is None else env_ids] = 0.0
 
 
+class feet_low_swing_cost:
+    """One-sided swing-clearance cost, charged at each landing: sum over feet of
+    clamp((min_apex − apex) / min_apex, 0, 1)², apex = highest foot-above-terrain height
+    (height-scan sensor) during the swing that just ended. ≥ 0 → NEGATIVE weight.
+
+    Why (VelStandFast stage 3, 2026-10-28, 128 robots at 0.4 m/s on rough): 12.5 % fell in
+    20 s vs 3 % for v8, 12 of 20 forward. The last swings before a fall peaked at p10 2 mm
+    above the terrain (14 mm for robots that never fell), every one at a ≥ 8 mm stair/box
+    edge: at twice v8's speed a scuff is a trip. The stock feet_swing_height is symmetric,
+    (apex/target − 1)² × 0.25 per landing, so a 2 mm scuff cost 0.2 and a 38 mm step the
+    same. This charges only swings below min_apex; high steps are free. Zero while
+    standing (|command| ≤ threshold) and while fallen (tilt > gate) — get-up flailing is
+    not a gait."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        n_feet = 2
+        self.peak = torch.zeros(env.num_envs, n_feet, device=env.device)
+        self.prev_contact = torch.ones(env.num_envs, n_feet, dtype=torch.bool, device=env.device)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        height_sensor_name: str,
+        command_name: str,
+        min_apex: float = 0.010,
+        command_threshold: float = 0.01,
+        gate_tilt_above_deg: float = 40.0,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        contact = env.scene[sensor_name].data.found > 0
+        height = torch.nan_to_num(env.scene[height_sensor_name].data.heights, nan=0.0)
+        in_air = ~contact
+        self.peak = torch.where(in_air, torch.maximum(self.peak, height), self.peak)
+        landing = contact & ~self.prev_contact
+        short = ((min_apex - self.peak) / min_apex).clamp(0.0, 1.0)
+        cost = (short.square() * landing.float()).sum(dim=1)
+        self.peak = torch.where(landing, torch.zeros_like(self.peak), self.peak)
+        self.prev_contact = contact
+        cmd = env.command_manager.get_command(command_name)
+        walking = (torch.norm(cmd[:, :2], dim=1) + cmd[:, 2].abs()) > command_threshold
+        asset: Entity = env.scene[asset_cfg.name]
+        upright = 1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
+        return cost * walking.float() * upright
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.peak[ids] = 0.0
+        self.prev_contact[ids] = True
+
+
 def upright_body_cmd_relative(
     env: ManagerBasedRlEnv,
     std: float,

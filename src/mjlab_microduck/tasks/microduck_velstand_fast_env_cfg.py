@@ -40,6 +40,9 @@ pose running tier). Launched as a plain resume of run 1's model_3748.
 STAGE 3 (2026-10-28): stage 2 fixed the reward but not the gait; a frozen model_4747 fed a
 calibrated larger vx command teaches the forward frames (see the stage-3 block). Plain resume
 of stage 2's model_4747.
+STAGE 4 (2026-10-28): stage 3 trips on rough ground at speed; a one-sided low-swing landing
+cost and the vx teacher eased 1.0 → 0.25 (see the stage-4 block). Plain resume of stage 3's
+model_5746.
 SUCCESS = re-measured with the 2026-10-27 method (scratchpad measure_gait.py): 0.35-0.4 m/s
 achieved at a 0.4 command, stride frequency rising with the command, cmd 0.1 actually
 walks, no regression in falls / get-up. Watch Episode_Reward/air_time not collapsing to 0
@@ -112,6 +115,18 @@ VX_TEACHER_REMAP = {                # inverse of the curve above at the trained 
     "fed": [0.183, 0.238, 0.302, 0.364, 0.436, 0.492, 0.561],
 }
 
+# ── Stage 4 (2026-10-28): stop tripping at speed on rough ground ─────────────
+# Stage 3 (iq06yjt5 → model_5746): 0.39 m/s at a 0.4 command, flat falls ≤ 1.6 % in 20 s
+# (64 robots; v8 1.6-4.7 %), but rough 12.5-14 % vs v8 3 %, and its own teacher 6-16 %.
+# 128 robots at 0.4 on rough: 12 of 20 falls forward; last swings before a fall p10 apex 2 mm
+# above the terrain (14 mm for robots that never fell), all at ≥ 8 mm stair/box edges.
+ENABLE_LOW_SWING_COST = True
+LOW_SWING_MIN_APEX = 0.010          # m; the never-fell robots' p10 apex is 14 mm
+# A full scuff (apex 0) costs ≈ a quarter-second of speed tracking at speed: (track_vx_fine
+# ≈ 3.4 + track_linear_velocity ≈ 1.3)/step × 12.5 steps ≈ 60. A 2 mm scuff: 0.64 × 60 ≈ 38.
+LOW_SWING_WEIGHT = -60.0
+VX_TEACHER_COEF_RAMP = (VX_TEACHER_COEF, 0.25, 400)   # (start, end, iters of this run)
+
 
 def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False):
     cfg = make_microduck_velstand_env_cfg(play=play, rough=rough)
@@ -161,6 +176,20 @@ def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False
         cfg.rewards["pose"].params.update(
             {"running_threshold": POSE_RUNNING_THRESHOLD, "std_running": dict(POSE_STD_RUNNING)}
         )
+    if ENABLE_LOW_SWING_COST:
+        sw = cfg.rewards["foot_swing_height"].params
+        cfg.rewards["low_swing"] = RewardTermCfg(
+            func=microduck_mdp.feet_low_swing_cost,
+            weight=LOW_SWING_WEIGHT,
+            params={
+                "sensor_name": sw["sensor_name"],
+                "height_sensor_name": sw["height_sensor_name"],
+                "command_name": sw["command_name"],
+                "min_apex": LOW_SWING_MIN_APEX,
+                "command_threshold": sw["command_threshold"],
+                "gate_tilt_above_deg": REWARD_GATE_TILT_DEG,
+            },
+        )
     return cfg
 
 
@@ -177,6 +206,7 @@ if ENABLE_VX_TEACHER and MicroduckVelStandFastRlCfg.algorithm.bc_cfg is not None
         "vx_teacher_wandb_run_path": VX_TEACHER_WANDB_RUN,
         "vx_teacher_checkpoint_name": VX_TEACHER_CHECKPOINT,
         "vx_teacher_remap": VX_TEACHER_REMAP,
+        "vx_teacher_coef_ramp": VX_TEACHER_COEF_RAMP if ENABLE_LOW_SWING_COST else None,
     })
 
 assert math.isclose(AIR_MIN_KNOTS[0], 0.125) and math.isclose(AIR_MAX_KNOTS[0], 0.30), \
