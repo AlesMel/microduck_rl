@@ -43,6 +43,8 @@ of stage 2's model_4747.
 STAGE 4 (2026-10-28): stage 3 trips on rough ground at speed; a one-sided low-swing landing
 cost and the vx teacher eased 1.0 → 0.25 (see the stage-4 block). Plain resume of stage 3's
 model_5746.
+STAGE 5 (2026-10-28): heading drift at speed; fine yaw std 0.35 → 0.15 on the EMA, vx teacher
+held at 0.25 (see the stage-5 block). Plain resume of stage 4's model_6745.
 SUCCESS = re-measured with the 2026-10-27 method (scratchpad measure_gait.py): 0.35-0.4 m/s
 achieved at a 0.4 command, stride frequency rising with the command, cmd 0.1 actually
 walks, no regression in falls / get-up. Watch Episode_Reward/air_time not collapsing to 0
@@ -131,6 +133,17 @@ LOW_SWING_WEIGHT = -60.0
 LOW_SWING_VX_RAMP = (0.15, 0.30)
 VX_TEACHER_COEF_RAMP = (VX_TEACHER_COEF, 0.25, 400)   # (start, end, iters of this run)
 
+# ── Stage 5 (2026-10-28): drift ────────────────────────────────────────────────
+# Straight-walk heading drift, mean |wz| over 32 robots on flat (calib_vx.py): stage-4
+# model_6745 0.07/0.11/0.16 rad/s at 0.2/0.3/0.4 vs v8 0.06/0.04/0.07 — visible curving.
+# The yaw terms score a 0.5 s EMA since stage 2, so the in-stride wobble no longer counts and
+# a tighter std prices only real drift: fine std 0.35 → 0.15 (a steady 0.2 rad/s drift costs
+# 1.7/step instead of 0.6). The vx teacher (which itself drifts ≈ 0.2 at fed 0.5-0.6) stays
+# at stage 4's 0.25 — a new run would otherwise restart the stage-4 ramp at 1.0.
+ENABLE_DRIFT_FIX = True
+TRACK_YAW_FINE_EMA_STD = 0.15
+VX_TEACHER_COEF_STAGE5 = 0.25
+
 
 def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False):
     cfg = make_microduck_velstand_env_cfg(play=play, rough=rough)
@@ -169,7 +182,10 @@ def make_microduck_velstand_fast_env_cfg(play: bool = False, rough: bool = False
             params={"std": TRACK_VX_FINE_STD, "command_name": cmd_name, "axis": "lin_x",
                     "tau_s": EMA_TAU_S, "gate_tilt_above_deg": REWARD_GATE_TILT_DEG},
         )
-        for name, std in TRACK_YAW_EMA_STDS.items():
+        yaw_stds = dict(TRACK_YAW_EMA_STDS)
+        if ENABLE_DRIFT_FIX:
+            yaw_stds["track_yaw_fine"] = TRACK_YAW_FINE_EMA_STD
+        for name, std in yaw_stds.items():
             # Ungated, like the instantaneous terms they replace (recovery economics unchanged).
             cfg.rewards[name] = RewardTermCfg(
                 func=microduck_mdp.track_velocity_ema,
@@ -213,6 +229,9 @@ if ENABLE_VX_TEACHER and MicroduckVelStandFastRlCfg.algorithm.bc_cfg is not None
         "vx_teacher_remap": VX_TEACHER_REMAP,
         "vx_teacher_coef_ramp": VX_TEACHER_COEF_RAMP if ENABLE_LOW_SWING_COST else None,
     })
+    if ENABLE_DRIFT_FIX:
+        MicroduckVelStandFastRlCfg.algorithm.bc_cfg.update(
+            {"vx_teacher_coef": VX_TEACHER_COEF_STAGE5, "vx_teacher_coef_ramp": None})
 
 assert math.isclose(AIR_MIN_KNOTS[0], 0.125) and math.isclose(AIR_MAX_KNOTS[0], 0.30), \
     "slow end must match velstand's window so the slow walk / turning are unchanged"

@@ -94,7 +94,10 @@ def test_yaw_terms_on_ema():
         t = cfg.rewards[name]
         assert t.func is microduck_mdp.track_velocity_ema and t.params["axis"] == "ang_z", name
         assert t.weight == base.rewards[name].weight > 0, name          # same weight as the term it replaces
-        assert math.isclose(t.params["std"], base.rewards[name].params["std"]), name
+        if name == "track_yaw_fine" and vf.ENABLE_DRIFT_FIX:
+            assert t.params["std"] == vf.TRACK_YAW_FINE_EMA_STD < base.rewards[name].params["std"]  # stage 5: tighter
+        else:
+            assert math.isclose(t.params["std"], base.rewards[name].params["std"]), name
         assert t.params.get("gate_tilt_above_deg") is None, name         # ungated, like before (recovery untouched)
 
 
@@ -404,8 +407,11 @@ def test_low_swing_wired():
     assert 0 < t.params["min_apex"] < cfg.rewards["foot_swing_height"].params["target_height"]
     assert t.params["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
     bc = vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg
-    start, end, iters = bc["vx_teacher_coef_ramp"]
-    assert start == bc["vx_teacher_coef"] > end > 0 and iters > 0
+    if vf.ENABLE_DRIFT_FIX:   # stage 5 holds the teacher at stage 4's end value instead of re-ramping from 1.0
+        assert bc["vx_teacher_coef_ramp"] is None and bc["vx_teacher_coef"] == vf.VX_TEACHER_COEF_STAGE5 == vf.VX_TEACHER_COEF_RAMP[1]
+    else:
+        start, end, iters = bc["vx_teacher_coef_ramp"]
+        assert start == bc["vx_teacher_coef"] > end > 0 and iters > 0
 
 
 def test_vx_teacher_coef_ramp():
@@ -437,3 +443,11 @@ def test_low_swing_uses_the_vx_ramp():
     if vf.ENABLE_LOW_SWING_COST:
         lo, hi = vf.make_microduck_velstand_fast_env_cfg().rewards["low_swing"].params["vx_ramp"]
         assert 0.1 < lo < hi <= 0.4
+
+
+
+def test_drift_fix_tightens_only_the_fine_yaw_term():
+    cfg = vf.make_microduck_velstand_fast_env_cfg()
+    fine, coarse = cfg.rewards["track_yaw_fine"], cfg.rewards["track_angular_velocity"]
+    assert fine.params["std"] < coarse.params["std"]
+    assert fine.params["axis"] == coarse.params["axis"] == "ang_z"            # both on the EMA, roll/pitch excluded
