@@ -124,6 +124,12 @@ def default_bc_cfg() -> dict:
         "vx_teacher_checkpoint_name": None,
         "vx_teacher_coef": 0.0,
         "vx_teacher_remap": None,   # {"targets": |vx| knots, "fed": fed |vx| per knot}, both increasing
+        # Optional "wz_offset" in vx_teacher_remap (stage 6, 2026-10-28): {"fed": fed |vx| knots,
+        # "fwd": [...], "back": [...]} rad/s ADDED to the teacher's yaw command, interpolated on
+        # the fed |vx| (0 at fed 0, clamped past the last knot), "fwd" for vx > 0 and "back" for
+        # vx < 0. The stage-2 teacher turns right at speed (−0.20 rad/s at fed 0.56 with a zero
+        # yaw command, 32 robots) and BC copied that into the student; fed the offset it walks
+        # straight, so the label for "zero yaw" is straight again.
         # (start, end, iters): vx_teacher_coef moves linearly from start to end over the first
         # `iters` BC updates of THIS run (one per PPO iteration), then holds `end`. None = the
         # constant vx_teacher_coef. Stage 4 (2026-10-28): once the student has the speed, the
@@ -131,6 +137,19 @@ def default_bc_cfg() -> dict:
         # teacher 6-16 % falls in 20 s at 0.4 m/s); easing it lets PPO trade a little speed
         # for footing.
         "vx_teacher_coef_ramp": None,
+        # Mirrored BC samples (2026-10-28, VelStandFast stage 7): every BC sample is also fed
+        # left-right mirrored (obs and teacher label, symmetry.py tables), so the BC targets are
+        # symmetric even when a teacher is not. The fast walkers inherited the stage-2 vx
+        # teacher's lopsided gait (right hip carried ~8° more flexed, mirrored; one stance
+        # yawing more than the other → 0.14-0.17 rad/s drift, 64 robots); a mirror loss on the
+        # policy alone would fight the asymmetric labels.
+        "bc_mirror": False,
+        # Stage 7b: the mirrored samples' BC weight follows the mirror-loss ramp
+        # (symmetry_cfg["mirror_ramp_iters"], see PpoWithExpertBc.update): 0 → 1 with it.
+        # Stage 7c: only samples tilted less than this are mirrored (None = all). Mirroring the
+        # stand expert's get-up labels averaged left and right rolls (7b model_7750: 0 % get-up
+        # face-up and side-lying).
+        "bc_mirror_upright_tilt_deg": None,
         "body_active_axes": (2, 3, 4),
         "body_no_teacher_axes": (2,),
         # Flat actor-obs columns ZEROED in the stand expert's input on fallen frames (tilt >
@@ -241,7 +260,8 @@ def remap_anchor_yaw(obs: torch.Tensor, twist_slice: tuple[int, int], table: dic
 def remap_vx(obs: torch.Tensor, twist_slice: tuple[int, int], table: dict) -> torch.Tensor:
     """Copy of the flat obs with the forward command replaced by the one the vx teacher needs
     to actually reach it: piecewise linear in |vx| through (0, 0) and the table knots,
-    clamped at the last knot, sign kept."""
+    clamped at the last knot, sign kept. With table["wz_offset"], the yaw command also gets
+    the teacher's straight-walk correction for that fed speed and direction."""
     out = obs.clone()
     vx = obs[:, twist_slice[0]]
     dev, dt = obs.device, obs.dtype
@@ -249,7 +269,35 @@ def remap_vx(obs: torch.Tensor, twist_slice: tuple[int, int], table: dict) -> to
     fk = torch.as_tensor([0.0, *table["fed"]], dtype=dt, device=dev)
     fed = _interp_rows(vx.abs(), tk, fk.expand(vx.numel(), -1))
     out[:, twist_slice[0]] = torch.sign(vx) * fed
+    off = table.get("wz_offset")
+    if off is not None:
+        ok = torch.as_tensor([0.0, *off["fed"]], dtype=dt, device=dev)
+        for key, rows in (("fwd", vx > 0), ("back", vx < 0)):
+            if rows.any():
+                ov = torch.as_tensor([0.0, *off[key]], dtype=dt, device=dev)
+                out[rows, twist_slice[0] + 2] += _interp_rows(fed[rows], ok, ov.expand(int(rows.sum()), -1))
     return out
+
+
+def mirror_bc_samples(obs_td: TensorDict, target: torch.Tensor, weight: torch.Tensor,
+                      groups: list[str], mirror_weight: float = 1.0,
+                      upright_tilt_deg: float | None = None) -> tuple[TensorDict, torch.Tensor, torch.Tensor]:
+    """[original; left-right mirrored] BC samples: actor obs and action labels mirrored with the
+    symmetry.py tables, the mirrored half weighted ``mirror_weight`` × the original's. Other obs
+    groups are repeated unmirrored (the actor does not read them). With ``upright_tilt_deg``
+    only samples tilted less than that are mirrored (stage 7c: get-up labels stay one-sided)."""
+    from mjlab_microduck.tasks.symmetry import _get_tensors, upright_rows
+    assert list(groups) == ["actor"], groups
+    if upright_tilt_deg is not None:
+        keep = upright_rows(obs_td["actor"], upright_tilt_deg)
+        src_td, src_target, src_weight = obs_td[keep], target[keep], weight[keep]
+    else:
+        src_td, src_target, src_weight = obs_td, target, weight
+    obs_perm, obs_sign, act_perm, act_sign = _get_tensors(target.device)
+    mir = src_td.clone()
+    mir["actor"] = src_td["actor"][:, obs_perm] * obs_sign
+    return (torch.cat([obs_td, mir]), torch.cat([target, src_target[:, act_perm] * act_sign]),
+            torch.cat([weight, src_weight * mirror_weight]))
 
 
 def _with_flat(td: TensorDict, groups: list[str], flat: torch.Tensor) -> TensorDict:
@@ -411,6 +459,10 @@ class PpoWithExpertBc(PPO):
         obs_td = torch.cat(parts_td) if len(parts_td) > 1 else parts_td[0]
         target = torch.cat(parts_target)
         weight = torch.cat(parts_weight)
+        if cfg.get("bc_mirror"):
+            obs_td, target, weight = mirror_bc_samples(obs_td, target, weight, groups, self._mirror_frac(),
+                                                       cfg.get("bc_mirror_upright_tilt_deg"))
+            stats["expert_bc_mirror_weight"] = self._mirror_frac()
         n = target.shape[0]
         mb = max(cfg.get("min_mini_batch", 1), n // cfg["mini_batches"])
         total = 0.0
@@ -430,8 +482,26 @@ class PpoWithExpertBc(PPO):
         stats["expert_bc"] = total / max(steps, 1)
         return stats
 
+    def _mirror_frac(self) -> float:
+        """Share of the left-right symmetry constraint switched on: linear 0 → 1 over
+        symmetry_cfg["mirror_ramp_iters"] PPO updates of THIS run, 1 when there is no ramp.
+        Stage 7b (2026-10-28): mirror loss at its full 0.5 from iteration 0 collapsed the
+        lopsided fast gait onto its average with its mirror image within ~20 iterations
+        (speed term 0.89 → 0.3, falls); ramped, PPO keeps the gait while it straightens."""
+        ramp = (getattr(self, "symmetry", None) or {}).get("mirror_ramp_iters")
+        if not ramp:
+            return 1.0
+        return min(getattr(self, "_ppo_updates", 0) / ramp, 1.0)
+
     def update(self) -> dict[str, float]:
+        if self.symmetry and self.symmetry.get("mirror_ramp_iters"):
+            if not hasattr(self, "_mirror_coeff_end"):
+                self._mirror_coeff_end = self.symmetry["mirror_loss_coeff"]
+            self.symmetry["mirror_loss_coeff"] = self._mirror_frac() * self._mirror_coeff_end
         loss_dict = super().update()
+        if self.symmetry and self.symmetry.get("mirror_ramp_iters"):
+            loss_dict["mirror_coeff"] = self.symmetry["mirror_loss_coeff"]
         if self.expert is not None:
             loss_dict.update(self._bc_update())
+        self._ppo_updates = getattr(self, "_ppo_updates", 0) + 1
         return loss_dict

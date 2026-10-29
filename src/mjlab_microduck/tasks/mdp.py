@@ -4745,6 +4745,15 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
 
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         super()._resample_command(env_ids)
+        # Heading-hold practice (VelStandFast stage 6): mjlab draws the heading target
+        # uniformly in world frame, so most heading envs would start with a large error and
+        # just turn at the clipped rate. Drawn near the CURRENT heading instead, they spend
+        # their time on small corrective yaw commands while walking — the runtime heading
+        # loop's regime (wz = stiffness · heading error).
+        rel = getattr(self.cfg, "heading_target_rel_range", None)
+        if self.cfg.heading_command and rel is not None:
+            r = torch.empty(len(env_ids), device=self.device).uniform_(*rel)
+            self.heading_target[env_ids] = wrap_to_pi(self.robot.data.heading_w[env_ids] + r)
         # Turn-in-place practice: for a fraction of envs, zero the linear velocity
         # and force a meaningful (away-from-zero) yaw command. Independent uniform
         # sampling almost never produces "lin≈0, |ang| large" (~2% of samples), so
@@ -4767,8 +4776,10 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
         mag = torch.empty(len(turn_ids), device=self.device).uniform_(lo_frac * maxr, maxr)
         self.vel_command_b[turn_ids, 2] = sign * mag
         # These envs must actually turn — un-mark them as standing (which would
-        # zero the command) and refresh the world-frame reference copy.
+        # zero the command) or heading-controlled (which would overwrite the yaw
+        # every step) and refresh the world-frame reference copy.
         self.is_standing_env[turn_ids] = False
+        self.is_heading_env[turn_ids] = False
         self.vel_command_w[turn_ids] = self.vel_command_b[turn_ids]
 
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
@@ -4811,6 +4822,9 @@ class VelocityCommandCommandOnlyCfg(UniformVelocityCommandCfg):
     # 0.4 (historical) means in-place yaw below 0.4 rad/s is never trained (standing
     # envs zero the whole command; uniform sampling never gives lin == 0).
     turn_in_place_min_frac: float = 0.4
+    # (lo, hi) rad: heading envs draw their target as current heading + U(lo, hi) instead of
+    # mjlab's absolute ranges.heading. None = mjlab's behaviour.
+    heading_target_rel_range: tuple[float, float] | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> "VelocityCommandCommandOnly":
         return VelocityCommandCommandOnly(self, env)

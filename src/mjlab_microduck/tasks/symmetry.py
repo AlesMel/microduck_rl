@@ -167,3 +167,50 @@ def microduck_vel_symmetry(
         aug_actions = torch.cat([actions, actions_sym], dim=0)
 
     return aug_obs, aug_actions
+
+
+# ---------------------------------------------------------------------------
+# Upright-only variant (VelStandFast stage 7c, 2026-10-28)
+# ---------------------------------------------------------------------------
+
+# Rows tilted more than this are left unmirrored (same gate as the BC walk anchor).
+UPRIGHT_TILT_DEG = 25.0
+_last_upright_mask: torch.Tensor | None = None
+
+
+def upright_rows(actor_obs: torch.Tensor, tilt_deg: float = UPRIGHT_TILT_DEG) -> torch.Tensor:
+    """tilt < tilt_deg from the projected-gravity block [3:6] (renormalized)."""
+    g = actor_obs[:, 3:6]
+    g = g / g.norm(dim=1, keepdim=True).clamp_min(1e-6)
+    return -g[:, 2] > torch.cos(torch.deg2rad(torch.tensor(tilt_deg, device=actor_obs.device)))
+
+
+def microduck_vel_symmetry_upright(
+    env,
+    obs: TensorDict | None,
+    actions: torch.Tensor | None,
+) -> tuple[TensorDict | None, torch.Tensor | None]:
+    """microduck_vel_symmetry, but only upright rows are mirrored; tilted rows are returned
+    unchanged in the "mirrored" half, so the mirror loss is zero there.
+
+    Why (stage 7b, 2026-10-28): get-up moves are one-sided (the robot rolls to a side) and a
+    mirror loss over every frame averaged the two directions: model_7750 recovered 0 % face-up
+    and side-lying vs 100 % before. Walking is where symmetry is wanted.
+
+    rsl_rl calls this with obs first, then (same minibatch) with the original-half actions;
+    the row mask from the obs call is reused for the actions call.
+    """
+    global _last_upright_mask
+    aug_obs, aug_actions = microduck_vel_symmetry(env, obs, actions)
+    if obs is not None:
+        b = obs["actor"].shape[0]
+        mask = upright_rows(obs["actor"])
+        _last_upright_mask = mask
+        mirrored = aug_obs["actor"][b:]
+        aug_obs["actor"][b:] = torch.where(mask[:, None], mirrored, obs["actor"])
+    if actions is not None:
+        mask = _last_upright_mask
+        b = actions.shape[0]
+        assert mask is not None and mask.shape[0] == b, "actions call must follow an obs call of the same batch"
+        aug_actions[b:] = torch.where(mask[:, None], aug_actions[b:], actions)
+    return aug_obs, aug_actions

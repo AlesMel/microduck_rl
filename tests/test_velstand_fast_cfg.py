@@ -123,7 +123,7 @@ def test_anchor_fade_only_in_fast_runner_cfg():
     lo, hi = vf.ANCHOR_VX_FADE
     assert vf.AIR_SPEED_KNOTS[0] <= lo < hi < vf.AIR_SPEED_KNOTS[1]
     # everything else about the BC is velstand's
-    ours = lambda k: k == "anchor_vx_fade" or k.startswith("vx_teacher_")  # noqa: E731
+    ours = lambda k: k in ("anchor_vx_fade", "bc_mirror", "bc_mirror_upright_tilt_deg") or k.startswith("vx_teacher_")  # noqa: E731
     assert {k: v for k, v in fast.items() if not ours(k)} == \
            {k: v for k, v in vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.items() if not ours(k)}
     assert vf.MicroduckVelStandFastRlCfg.experiment_name != vs.MicroduckVelStandRlCfg.experiment_name
@@ -407,7 +407,9 @@ def test_low_swing_wired():
     assert 0 < t.params["min_apex"] < cfg.rewards["foot_swing_height"].params["target_height"]
     assert t.params["gate_tilt_above_deg"] == vs.REWARD_GATE_TILT_DEG
     bc = vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg
-    if vf.ENABLE_DRIFT_FIX:   # stage 5 holds the teacher at stage 4's end value instead of re-ramping from 1.0
+    if vf.ENABLE_HEADING_ENVS:  # stage 6 holds the teacher at stage 4's end value instead of re-ramping from 1.0
+        assert bc["vx_teacher_coef_ramp"] is None and bc["vx_teacher_coef"] == vf.VX_TEACHER_COEF_STAGE6 == vf.VX_TEACHER_COEF_RAMP[1]
+    elif vf.ENABLE_DRIFT_FIX:   # stage 5 likewise
         assert bc["vx_teacher_coef_ramp"] is None and bc["vx_teacher_coef"] == vf.VX_TEACHER_COEF_STAGE5 == vf.VX_TEACHER_COEF_RAMP[1]
     else:
         start, end, iters = bc["vx_teacher_coef_ramp"]
@@ -451,3 +453,173 @@ def test_drift_fix_tightens_only_the_fine_yaw_term():
     fine, coarse = cfg.rewards["track_yaw_fine"], cfg.rewards["track_angular_velocity"]
     assert fine.params["std"] < coarse.params["std"]
     assert fine.params["axis"] == coarse.params["axis"] == "ang_z"            # both on the EMA, roll/pitch excluded
+
+
+# ── Heading hold (stage 6) ───────────────────────────────────────────────────
+
+def test_remap_vx_wz_offset_by_fed_speed_and_direction():
+    from mjlab_microduck.tasks.distill import remap_vx
+    obs = torch.zeros(5, 61)
+    obs[:, 48] = torch.tensor([0.0, 0.2, 0.4, -0.2, 0.6])
+    obs[:, 50] = 0.3
+    table = {"targets": [0.2, 0.4], "fed": [0.3, 0.6],
+             "wz_offset": {"fed": [0.3, 0.6], "fwd": [0.1, 0.2], "back": [-0.1, 0.4]}}
+    out = remap_vx(obs, (48, 51), table)
+    assert torch.allclose(out[:, 48], torch.tensor([0.0, 0.3, 0.6, -0.3, 0.6]))
+    # zero vx: no offset; fwd/back lists by sign; clamped past the last knot (fed 0.6 at vx 0.6)
+    assert torch.allclose(out[:, 50], torch.tensor([0.3, 0.4, 0.5, 0.2, 0.5]))
+    plain = remap_vx(obs, (48, 51), {"targets": [0.2, 0.4], "fed": [0.3, 0.6]})
+    assert (plain[:, 50] == 0.3).all()                                    # no table → yaw untouched
+
+
+def test_heading_envs_wired():
+    for play in (False, True):
+        tw = vf.make_microduck_velstand_fast_env_cfg(play=play).commands["twist"]
+        if not vf.ENABLE_HEADING_ENVS:
+            assert tw.rel_heading_envs == 0.0
+            continue
+        assert isinstance(tw, microduck_mdp.VelocityCommandCommandOnlyCfg) and tw.heading_command
+        assert tw.rel_heading_envs == vf.REL_HEADING_ENVS > 0
+        assert tw.heading_control_stiffness == vf.HEADING_CONTROL_STIFFNESS
+        lo, hi = tw.heading_target_rel_range
+        assert lo < 0 < hi <= 1.0                                            # small corrections, both ways
+        assert tw.rel_turn_in_place_envs > 0                                 # turn-in-place bucket kept
+    vel = vs.make_microduck_velstand_env_cfg().commands["twist"]
+    assert vel.rel_heading_envs == 0.0 and vel.heading_target_rel_range is None   # velstand untouched
+    bc = vf.MicroduckVelStandFastRlCfg.algorithm.bc_cfg
+    if vf.ENABLE_HEADING_ENVS:
+        off = bc["vx_teacher_remap"]["wz_offset"]
+        assert len(off["fed"]) == len(off["fwd"]) == len(off["back"]) and off["fed"] == sorted(off["fed"])
+        assert off["fwd"][-1] > 0 and off["back"][-1] > 0                     # the teacher turns right at speed
+
+
+def _heading_cmd(n, heading, p_heading, p_turn):
+    cfg = microduck_mdp.VelocityCommandCommandOnlyCfg(
+        entity_name="robot", resampling_time_range=(3.0, 8.0), heading_command=True,
+        rel_heading_envs=p_heading, rel_standing_envs=0.0, rel_turn_in_place_envs=p_turn,
+        heading_target_rel_range=(-0.5, 0.5),
+        ranges=microduck_mdp.VelocityCommandCommandOnlyCfg.Ranges(
+            lin_vel_x=(-0.4, 0.4), lin_vel_y=(-0.3, 0.3), ang_vel_z=(-1.0, 1.0), heading=(-math.pi, math.pi)))
+    term = microduck_mdp.VelocityCommandCommandOnly.__new__(microduck_mdp.VelocityCommandCommandOnly)
+    term._env = SimpleNamespace(num_envs=n, device="cpu")
+    term.cfg = cfg
+    term.robot = SimpleNamespace(data=SimpleNamespace(heading_w=heading))
+    term.vel_command_b = torch.zeros(n, 3); term.vel_command_w = torch.zeros(n, 3)
+    term.heading_target = torch.zeros(n); term.heading_error = torch.zeros(n)
+    for f in ("is_heading_env", "is_standing_env", "is_world_env", "is_forward_env"):
+        setattr(term, f, torch.zeros(n, dtype=torch.bool))
+    return term
+
+
+def test_heading_targets_drawn_near_current_heading():
+    n = 2000
+    heading = torch.linspace(-3.1, 3.1, n)
+    term = _heading_cmd(n, heading, 1.0, 0.0)
+    term._resample_command(torch.arange(n))
+    from mjlab.utils.lab_api.math import wrap_to_pi
+    d = wrap_to_pi(term.heading_target - heading)
+    assert d.abs().max() <= 0.5 + 1e-5 and d.std() > 0.2 and term.is_heading_env.all()
+    assert (term.heading_target.abs() <= math.pi + 1e-5).all()               # wrapped across ±π
+
+
+def test_turn_in_place_envs_leave_heading_mode():
+    n = 2000
+    term = _heading_cmd(n, torch.zeros(n), 1.0, 0.5)
+    term._resample_command(torch.arange(n))
+    turning = (term.vel_command_b[:, :2] == 0).all(1) & (term.vel_command_b[:, 2].abs() >= 0.4)
+    assert 0.3 < turning.float().mean() < 0.7
+    assert not term.is_heading_env[turning].any() and term.is_heading_env[~turning].all()
+
+
+# ── Symmetric gait (stage 7) ─────────────────────────────────────────────────
+
+def test_mirror_bc_samples_doubles_and_mirrors():
+    from mjlab_microduck.tasks.distill import mirror_bc_samples
+    from mjlab_microduck.tasks.symmetry import microduck_vel_symmetry
+    g = torch.Generator().manual_seed(0)
+    obs = torch.randn(5, 61, generator=g)
+    td = TensorDict({"actor": obs, "critic": torch.randn(5, 76, generator=g)}, batch_size=[5])
+    act = torch.randn(5, 14, generator=g)
+    w = torch.rand(5, generator=g)
+    td2, act2, w2 = mirror_bc_samples(td, act, w, ["actor"])
+    ref_td, ref_act = microduck_vel_symmetry(None, td, act)               # same tables as the mirror loss
+    assert torch.equal(td2["actor"], ref_td["actor"]) and torch.equal(act2, ref_act)
+    assert torch.equal(w2, torch.cat([w, w])) and torch.equal(td2["critic"][5:], td["critic"])
+    back, back_act, _ = mirror_bc_samples(td2[5:], act2[5:], w, ["actor"])
+    assert torch.allclose(back["actor"][5:], obs) and torch.allclose(back_act[5:], act)   # mirror ∘ mirror = id
+    assert torch.equal(td["actor"], obs)                                                  # input untouched
+    m = td2["actor"][5:]
+    assert torch.equal(m[:, 48], obs[:, 48]) and torch.equal(m[:, 50], -obs[:, 50])       # vx kept, yaw command flipped
+
+
+def test_symmetry_wired():
+    alg = vf.MicroduckVelStandFastRlCfg.algorithm
+    if not vf.ENABLE_SYMMETRY:
+        assert alg.symmetry_cfg is None
+        return
+    assert alg.symmetry_cfg["use_mirror_loss"] and alg.symmetry_cfg["mirror_loss_coeff"] > 0
+    assert "microduck_vel_symmetry" in alg.symmetry_cfg["data_augmentation_func"]
+    assert alg.bc_cfg["bc_mirror"] is True
+    if vf.ENABLE_MIRROR_UPRIGHT_ONLY:   # stage 7c: upright frames only, held coefficient, no ramp
+        assert alg.symmetry_cfg["data_augmentation_func"].endswith("microduck_vel_symmetry_upright")
+        assert alg.symmetry_cfg["mirror_loss_coeff"] == vf.MIRROR_UPRIGHT_COEFF and "mirror_ramp_iters" not in alg.symmetry_cfg
+        assert alg.bc_cfg["bc_mirror_upright_tilt_deg"] == alg.bc_cfg["anchor_tilt_deg"]   # same upright gate
+    else:
+        assert alg.symmetry_cfg["mirror_ramp_iters"] == vf.MIRROR_RAMP_ITERS > 0
+    assert vs.MicroduckVelStandRlCfg.algorithm.symmetry_cfg is None                      # velstand untouched
+    assert not vs.MicroduckVelStandRlCfg.algorithm.bc_cfg.get("bc_mirror")
+
+
+def test_mirror_ramp_schedule_and_bc_weight():
+    from mjlab_microduck.tasks.distill import mirror_bc_samples
+    algo = PpoWithExpertBc.__new__(PpoWithExpertBc)
+    algo.symmetry = None
+    assert algo._mirror_frac() == 1.0                                     # no symmetry → no ramp
+    algo.symmetry = {"mirror_loss_coeff": 0.5}
+    assert algo._mirror_frac() == 1.0                                     # no ramp key → full
+    algo.symmetry["mirror_ramp_iters"] = 4
+    fr = []
+    for k in range(6):
+        algo._ppo_updates = k
+        fr.append(algo._mirror_frac())
+    assert fr == [0.0, 0.25, 0.5, 0.75, 1.0, 1.0]
+    td = TensorDict({"actor": torch.randn(3, 61)}, batch_size=[3])
+    _, _, w = mirror_bc_samples(td, torch.randn(3, 14), torch.tensor([1.0, 2.0, 3.0]), ["actor"], 0.25)
+    assert torch.allclose(w, torch.tensor([1.0, 2.0, 3.0, 0.25, 0.5, 0.75]))
+
+
+def _tilted_obs(n_up, n_tilt, g):
+    obs = torch.randn(n_up + n_tilt, 61, generator=g)
+    obs[:, 3:6] = torch.tensor([0.0, 0.0, -1.0])
+    obs[n_up:, 3:6] = torch.tensor([0.0, -0.7, -0.7])                  # 45° roll
+    return obs
+
+
+def test_upright_symmetry_leaves_tilted_rows_unmirrored():
+    from mjlab_microduck.tasks.symmetry import microduck_vel_symmetry, microduck_vel_symmetry_upright
+    g = torch.Generator().manual_seed(1)
+    obs = _tilted_obs(3, 2, g)
+    td = TensorDict({"actor": obs, "critic": torch.randn(5, 76, generator=g)}, batch_size=[5])
+    full, _ = microduck_vel_symmetry(None, td, None)
+    aug, _ = microduck_vel_symmetry_upright(None, td, None)
+    assert torch.equal(aug["actor"][:5], obs)                              # original half untouched
+    assert torch.equal(aug["actor"][5:8], full["actor"][5:8])              # upright rows mirrored
+    assert torch.equal(aug["actor"][8:], obs[3:])                          # tilted rows: identity
+    act = torch.randn(5, 14, generator=g)
+    _, full_a = microduck_vel_symmetry(None, None, act)
+    _, aug_a = microduck_vel_symmetry_upright(None, None, act)              # reuses the obs call's mask
+    assert torch.equal(aug_a[5:8], full_a[5:8]) and torch.equal(aug_a[8:], act[3:])
+    with pytest.raises(AssertionError):
+        microduck_vel_symmetry_upright(None, None, torch.randn(4, 14))      # batch mismatch caught
+
+
+def test_mirror_bc_samples_upright_only():
+    from mjlab_microduck.tasks.distill import mirror_bc_samples
+    g = torch.Generator().manual_seed(2)
+    obs = _tilted_obs(3, 2, g)
+    td = TensorDict({"actor": obs}, batch_size=[5])
+    tgt = torch.randn(5, 14, generator=g)
+    td2, t2, w2 = mirror_bc_samples(td, tgt, torch.ones(5), ["actor"], 1.0, 25.0)
+    assert td2.shape[0] == 8 and t2.shape[0] == 8 and w2.shape[0] == 8      # 5 originals + 3 upright mirrors
+    full, ft, _ = mirror_bc_samples(td[:3], tgt[:3], torch.ones(3), ["actor"])
+    assert torch.equal(td2["actor"][5:], full["actor"][3:]) and torch.equal(t2[5:], ft[3:])
