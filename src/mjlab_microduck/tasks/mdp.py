@@ -4740,11 +4740,33 @@ def face_down_prob_curriculum(
     return torch.tensor([current_prob])
 
 
+def _qpos_heading(robot, env_ids) -> torch.Tensor:
+    """World heading of the free-joint root from qpos (wxyz quat): current right after a
+    reset writes the root state, unlike data.heading_w, which reads xquat and is stale
+    until the next sim.forward()."""
+    quat = robot.data.data.qpos[env_ids][:, robot.indexing.free_joint_q_adr[3:7]]
+    forward = quat_apply(quat, robot.data.forward_vec_b[env_ids])
+    return torch.atan2(forward[:, 1], forward[:, 0])
+
+
 class VelocityCommandCommandOnly(UniformVelocityCommand):
     """Like UniformVelocityCommand but only draws the command arrows (no actual velocity arrows)."""
 
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         super()._resample_command(env_ids)
+        # Heading-hold practice (VelStandFast stage 6): mjlab draws the heading target
+        # uniformly in world frame, so most heading envs would start with a large error and
+        # just turn at the clipped rate. Drawn near the CURRENT heading instead, they spend
+        # their time on small corrective yaw commands while walking — the runtime heading
+        # loop's regime (wz = stiffness · heading error).
+        # The heading is read from qpos, not heading_w: on an episode reset this runs before
+        # sim.forward(), so heading_w (from xquat) still holds the PRE-reset orientation while
+        # reset_base has already written a random yaw into qpos — every heading env then
+        # started its episode with a random heading error (found 2026-10-28, Walk v2 smoke).
+        rel = getattr(self.cfg, "heading_target_rel_range", None)
+        if self.cfg.heading_command and rel is not None:
+            r = torch.empty(len(env_ids), device=self.device).uniform_(*rel)
+            self.heading_target[env_ids] = wrap_to_pi(_qpos_heading(self.robot, env_ids) + r)
         # Turn-in-place practice: for a fraction of envs, zero the linear velocity
         # and force a meaningful (away-from-zero) yaw command. Independent uniform
         # sampling almost never produces "lin≈0, |ang| large" (~2% of samples), so
@@ -4767,8 +4789,10 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
         mag = torch.empty(len(turn_ids), device=self.device).uniform_(lo_frac * maxr, maxr)
         self.vel_command_b[turn_ids, 2] = sign * mag
         # These envs must actually turn — un-mark them as standing (which would
-        # zero the command) and refresh the world-frame reference copy.
+        # zero the command) or heading-controlled (which would overwrite the yaw
+        # every step) and refresh the world-frame reference copy.
         self.is_standing_env[turn_ids] = False
+        self.is_heading_env[turn_ids] = False
         self.vel_command_w[turn_ids] = self.vel_command_b[turn_ids]
 
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
@@ -4811,6 +4835,9 @@ class VelocityCommandCommandOnlyCfg(UniformVelocityCommandCfg):
     # 0.4 (historical) means in-place yaw below 0.4 rad/s is never trained (standing
     # envs zero the whole command; uniform sampling never gives lin == 0).
     turn_in_place_min_frac: float = 0.4
+    # (lo, hi) rad: heading envs draw their target as current heading + U(lo, hi) instead of
+    # mjlab's absolute ranges.heading. None = mjlab's behaviour.
+    heading_target_rel_range: tuple[float, float] | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> "VelocityCommandCommandOnly":
         return VelocityCommandCommandOnly(self, env)
@@ -5472,6 +5499,167 @@ def track_yaw_rate_fine(
     asset: Entity = env.scene[asset_cfg.name]
     cmd = env.command_manager.get_command(command_name)
     return torch.exp(-torch.square(cmd[:, 2] - asset.data.root_link_ang_vel_b[:, 2]) / std**2)
+
+
+# ── VelStandFast: speed-dependent stepping (2026-10-27) ──────────────────────
+
+def air_time_window(
+    speed: torch.Tensor,
+    speed_knots: tuple[float, float],
+    min_knots: tuple[float, float],
+    max_knots: tuple[float, float],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-env air-time window (lo, hi) in s, linear in `speed` between the two knots and
+    clamped outside them."""
+    u = ((speed - speed_knots[0]) / (speed_knots[1] - speed_knots[0])).clamp(0.0, 1.0)
+    lo = min_knots[0] + u * (min_knots[1] - min_knots[0])
+    hi = max_knots[0] + u * (max_knots[1] - max_knots[0])
+    return lo, hi
+
+
+def feet_air_time_speed_window(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    speed_knots: tuple[float, float] = (0.1, 0.4),
+    min_knots: tuple[float, float] = (0.125, 0.09),
+    max_knots: tuple[float, float] = (0.30, 0.15),
+    command_threshold: float = 0.01,
+    gate_tilt_above_deg: float = 40.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """feet_air_time_upright with the window sliding with the commanded |vx|.
+
+    Why (measured 2026-10-27, velstand v8 in its own env): the fixed [0.125, 0.3] s window
+    pays +1/step per foot for the whole part of a swing inside it, so a 0.25 s swing at
+    ~2 Hz collects 1.50/step at weight 3 — more than speed tracking (0.94 at a 0.4 m/s
+    command, achieved 0.18). A real 0.4 m/s gait needs ~0.13 s swings at ~3.5 Hz, which
+    the old window barely pays, so PPO kept the slow walk. Here the window is
+    [0.125, 0.30] s at |vx| ≤ 0.1 (unchanged) and [0.09, 0.15] s at |vx| ≥ 0.4: long swings
+    stop paying at speed. Lateral and turning commands keep the slow-end window. Zeroed
+    while fallen, like feet_air_time_upright."""
+    sensor = env.scene[sensor_name]
+    air = sensor.data.current_air_time
+    cmd = env.command_manager.get_command(command_name)
+    lo, hi = air_time_window(cmd[:, 0].abs(), speed_knots, min_knots, max_knots)
+    in_range = (air > lo.unsqueeze(1)) & (air < hi.unsqueeze(1))
+    reward = in_range.float().sum(dim=1)
+    in_air = (air > 0).float()
+    env.extras["log"]["Metrics/air_time_mean"] = (air * in_air).sum() / in_air.sum().clamp(min=1)
+    total_command = torch.norm(cmd[:, :2], dim=1) + cmd[:, 2].abs()
+    reward = reward * (total_command > command_threshold).float()
+    asset: Entity = env.scene[asset_cfg.name]
+    return reward * (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg))
+
+
+class track_velocity_ema:
+    """Gaussian tracking of ONE velocity axis on its exponential moving average,
+    exp(-(cmd - ema)²/std²), ema += (dt/tau)·(v - ema), reset to 0 with the episode.
+
+    Why (reward accounting on VelStandFast model_3748, 2026-10-28, true command 0.4, the
+    policy fed bigger commands so it really walks faster): a stepping gait oscillates
+    inside every stride, and instantaneous Gaussians tax that oscillation, not the error
+    the policy can remove. Yaw: drift ≈ 0.06 rad/s but in-stride yaw rate 0.7 → 1.0 rad/s
+    std from 0.25 → 0.33 m/s; the two instantaneous yaw terms paid 1.1 of 4.0 and lost
+    0.27/step going faster. Forward speed: the instantaneous vx Gaussian cannot pay in full
+    even when the stride-mean matches. A 0.5 s EMA (≈ one stride) keeps pricing drift and
+    mean speed and lets the in-stride oscillation cancel (AGENTS.md: price only the
+    escapable part). axis "lin_x" → body vx vs command[0]; "ang_z" → body yaw rate vs
+    command[2] (roll/pitch rates are NOT included, unlike the stock angular term).
+    Optional fallen gate as in feet_air_time_upright."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.ema = torch.zeros(env.num_envs, device=env.device)
+        self.alpha = env.step_dt / cfg.params.get("tau_s", 0.5)
+        assert 0.0 < self.alpha <= 1.0, self.alpha
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std: float,
+        command_name: str,
+        axis: str = "lin_x",
+        tau_s: float = 0.5,
+        gate_tilt_above_deg: float | None = None,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del tau_s  # baked into self.alpha
+        asset: Entity = env.scene[asset_cfg.name]
+        cmd = env.command_manager.get_command(command_name)
+        if axis == "lin_x":
+            v, c = asset.data.root_link_lin_vel_b[:, 0], cmd[:, 0]
+        elif axis == "ang_z":
+            v, c = asset.data.root_link_ang_vel_b[:, 2], cmd[:, 2]
+        else:
+            raise ValueError(f"track_velocity_ema: unknown axis {axis!r}")
+        self.ema += self.alpha * (torch.nan_to_num(v, nan=0.0) - self.ema)
+        r = torch.exp(-torch.square(c - self.ema) / std**2)
+        if gate_tilt_above_deg is not None:
+            r = r * (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg))
+        return r
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        self.ema[slice(None) if env_ids is None else env_ids] = 0.0
+
+
+class feet_low_swing_cost:
+    """One-sided swing-clearance cost, charged at each landing: sum over feet of
+    clamp((min_apex − apex) / min_apex, 0, 1)², apex = highest foot-above-terrain height
+    (height-scan sensor) during the swing that just ended. ≥ 0 → NEGATIVE weight.
+
+    Why (VelStandFast stage 3, 2026-10-28, 128 robots at 0.4 m/s on rough): 12.5 % fell in
+    20 s vs 3 % for v8, 12 of 20 forward. The last swings before a fall peaked at p10 2 mm
+    above the terrain (14 mm for robots that never fell), every one at a ≥ 8 mm stair/box
+    edge: at twice v8's speed a scuff is a trip. The stock feet_swing_height is symmetric,
+    (apex/target − 1)² × 0.25 per landing, so a 2 mm scuff cost 0.2 and a 38 mm step the
+    same. This charges only swings below min_apex; high steps are free. Zero while
+    standing (|command| ≤ threshold) and while fallen (tilt > gate) — get-up flailing is
+    not a gait.
+
+    ``vx_ramp`` (lo, hi): scale by clamp((|vx command| − lo)/(hi − lo), 0, 1). Trips are a
+    speed problem (v8 shuffles at 0.1-0.2 m/s and does not fall); unscaled at weight −60 the
+    measured cost on model_5746 was −1.35/step at 0.1 m/s — about what standing still would
+    save — and −0.81 sideways, vs −0.41 at 0.4."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        n_feet = 2
+        self.peak = torch.zeros(env.num_envs, n_feet, device=env.device)
+        self.prev_contact = torch.ones(env.num_envs, n_feet, dtype=torch.bool, device=env.device)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        height_sensor_name: str,
+        command_name: str,
+        min_apex: float = 0.010,
+        command_threshold: float = 0.01,
+        gate_tilt_above_deg: float = 40.0,
+        vx_ramp: tuple[float, float] | None = None,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        contact = env.scene[sensor_name].data.found > 0
+        height = torch.nan_to_num(env.scene[height_sensor_name].data.heights, nan=0.0)
+        in_air = ~contact
+        self.peak = torch.where(in_air, torch.maximum(self.peak, height), self.peak)
+        landing = contact & ~self.prev_contact
+        short = ((min_apex - self.peak) / min_apex).clamp(0.0, 1.0)
+        cost = (short.square() * landing.float()).sum(dim=1)
+        self.peak = torch.where(landing, torch.zeros_like(self.peak), self.peak)
+        self.prev_contact = contact
+        cmd = env.command_manager.get_command(command_name)
+        walking = (torch.norm(cmd[:, :2], dim=1) + cmd[:, 2].abs()) > command_threshold
+        asset: Entity = env.scene[asset_cfg.name]
+        upright = 1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
+        scale = walking.float() * upright
+        if vx_ramp is not None:
+            scale = scale * ((cmd[:, 0].abs() - vx_ramp[0]) / (vx_ramp[1] - vx_ramp[0])).clamp(0.0, 1.0)
+        return cost * scale
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.peak[ids] = 0.0
+        self.prev_contact[ids] = True
 
 
 def upright_body_cmd_relative(
