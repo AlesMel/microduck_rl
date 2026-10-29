@@ -7892,3 +7892,280 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ── Walk v2 (2026-10-28): walking retrained from scratch ─────────────────────────
+# Critic-only privileged observations, the performance-gated vx range curriculum and
+# the gait statistics logger. See microduck_walk_v2_env_cfg.py for why.
+#
+# Logging note: mjlab's _reset_idx replaces env.extras["log"] with a fresh dict on
+# every step that resets any env (≈ every step at 2048 envs), so values a reward or
+# metric writes there are mostly lost. Curriculum term states are re-logged by the
+# curriculum manager on every reset ("Curriculum/<term>/<key>"), so the gait stats
+# below ride that channel.
+
+
+class velocity_ema_obs:
+    """Critic obs: [EMA body vx, EMA body yaw rate], ema += (dt/tau)·(v − ema), reset to 0
+    with the episode — the same filter `track_velocity_ema` scores. Without it the critic
+    must predict an EMA reward from instantaneous velocity alone."""
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        self.ema = torch.zeros(env.num_envs, 2, device=env.device)
+        self.alpha = env.step_dt / cfg.params.get("tau_s", 0.5)
+        assert 0.0 < self.alpha <= 1.0, self.alpha
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        tau_s: float = 0.5,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del tau_s  # baked into self.alpha
+        asset: Entity = env.scene[asset_cfg.name]
+        v = torch.stack(
+            (asset.data.root_link_lin_vel_b[:, 0], asset.data.root_link_ang_vel_b[:, 2]), dim=1
+        )
+        self.ema += self.alpha * (torch.nan_to_num(v, nan=0.0) - self.ema)
+        return self.ema.clone()
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        self.ema[slice(None) if env_ids is None else env_ids] = 0.0
+
+
+def bam_dr_params_obs(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Critic obs: [battery voltage V, BAM friction_scale] of the first BAM actuator
+    group — the two actuator DR draws that most change how far a step travels.
+    Nominal (7.4, 1.0) on actuators without them."""
+    asset: Entity = env.scene[asset_cfg.name]
+    vin = torch.full((env.num_envs, 1), 7.4, device=env.device)
+    fs = torch.ones((env.num_envs, 1), device=env.device)
+    for actuator in asset.actuators:
+        v = getattr(actuator, "vin_tensor", None)
+        if v is not None:
+            vin = v.reshape(env.num_envs, 1)
+            f = getattr(actuator, "friction_scale", None)
+            if f is not None:
+                fs = f.reshape(env.num_envs, 1)
+            break
+    return _finite(torch.cat((vin, fs), dim=1))
+
+
+def body_com_offset_obs(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Critic obs: randomized CoM offset (body_ipos − compiled default) of the bodies in
+    `asset_cfg`, flattened (3 per body). Zeros while the field is not per-env expanded."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = asset.indexing.body_ids[asset_cfg.body_ids]
+    field = env.sim.model.body_ipos
+    if field.ndim < 3:
+        return torch.zeros(env.num_envs, 3 * len(ids), device=env.device)
+    default = env.sim.get_default_field("body_ipos")[ids]
+    return _finite((field[:, ids] - default.unsqueeze(0)).reshape(env.num_envs, -1))
+
+
+def geom_friction_obs(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Critic obs: sliding friction of the first geom in `asset_cfg` (the foot friction
+    DR shares one draw across both feet)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    gid = asset.indexing.geom_ids[asset_cfg.geom_ids][:1]
+    field = env.sim.model.geom_friction
+    if field.ndim < 3:
+        return field[gid, 0].reshape(1, 1).expand(env.num_envs, 1).clone()
+    return _finite(field[:, gid, 0].reshape(env.num_envs, 1))
+
+
+def heading_error_obs(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    """Critic obs: wrapped heading error in heading envs, 0 elsewhere. The actor only sees
+    the resulting wz command; the critic sees why it is there."""
+    term = env.command_manager.get_term(command_name)
+    robot = term.robot
+    err = wrap_to_pi(term.heading_target - robot.data.heading_w)
+    return _finite((err * term.is_heading_env.float()).unsqueeze(1))
+
+
+def _walk_v2_straight_mask(
+    env: ManagerBasedRlEnv, cmd: torch.Tensor, term, asset, gate_tilt_above_deg: float
+) -> torch.Tensor:
+    """Upright, commanded, not a standing env: the frames a gait statistic may use."""
+    upright = _fallen_mask(env, asset, 0.0, gate_tilt_above_deg) < 0.5
+    return upright & ~term.is_standing_env
+
+
+class vx_range_performance_curriculum:
+    """Widen the forward-speed command range only once the robot tracks its current edge.
+
+    Every `update_every_steps` env steps, look at the frames since the last update where
+    an upright, non-standing env is commanded |vx| ≥ edge_frac · current max, and take
+    the mean SIGNED shortfall |vx_cmd| − vx·sign(vx_cmd). In-stride surge cancels in the
+    mean (no EMA needed); a robot that cannot reach the edge shows a positive shortfall.
+    If it is below `max_shortfall` (with ≥ `min_samples` frames), widen the max by `step`,
+    up to `final_max`. Never narrows.
+
+    Why: a step-scheduled widening to ±0.4 / ±2.0 once outpaced the robot and showed up as
+    a reward and episode-length decline (velocity cfg docstring), and the leg-model ceiling
+    is ≈ 0.47-0.58 m/s across the 6.5-8.2 V voltage DR, so a fixed ±0.5 from step 0 would
+    make the top of the range unreachable for part of the fleet. Gating on measured
+    tracking cannot outpace the robot.
+
+    Called by the curriculum manager on resets (≈ every step at thousands of envs); it
+    samples ALL envs each call, not just the resetting ones."""
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        self.sum = torch.zeros((), device=env.device)
+        self.n = torch.zeros((), device=env.device)
+        self.last_update = 0
+        self.last_shortfall = float("nan")
+        self.initialized = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: torch.Tensor | slice,
+        command_name: str,
+        start_max: float,
+        final_max: float,
+        step: float = 0.05,
+        edge_frac: float = 0.8,
+        max_shortfall: float = 0.08,
+        update_every_steps: int = 50 * 24,
+        min_samples: int = 2000,
+        gate_tilt_above_deg: float = 40.0,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> dict[str, float]:
+        del env_ids
+        term = env.command_manager.get_term(command_name)
+        ranges = term.cfg.ranges
+        if not self.initialized:
+            # Always from start_max, also on resume (a resumed policy re-earns each
+            # 0.05 m/s widening within one update window).
+            ranges.lin_vel_x = (-start_max, start_max)
+            self.initialized = True
+            self.last_update = env.common_step_counter
+        cur = ranges.lin_vel_x[1]
+        asset: Entity = env.scene[asset_cfg.name]
+        cmd = term.command
+        mask = _walk_v2_straight_mask(env, cmd, term, asset, gate_tilt_above_deg)
+        mask &= cmd[:, 0].abs() >= edge_frac * cur
+        vx = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 0], nan=0.0)
+        short = cmd[:, 0].abs() - vx * torch.sign(cmd[:, 0])
+        self.sum += (short * mask.float()).sum()
+        self.n += mask.float().sum()
+        if env.common_step_counter - self.last_update >= update_every_steps:
+            self.last_update = env.common_step_counter
+            n = float(self.n.item())
+            if n >= min_samples:
+                self.last_shortfall = float(self.sum.item()) / n
+                if self.last_shortfall < max_shortfall and cur < final_max - 1e-6:
+                    new = min(cur + step, final_max)
+                    ranges.lin_vel_x = (-new, new)
+            self.sum.zero_()
+            self.n.zero_()
+        return {"vx_max": float(ranges.lin_vel_x[1]), "edge_shortfall": self.last_shortfall}
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        pass  # the window is global, not per env
+
+
+class walk_v2_gait_stats:
+    """Gait statistics for reading a run without a separate eval, logged as
+    Curriculum/<term>/<key>. Logging only: it changes nothing.
+
+    Sampled from ALL envs on every call, accumulated over `window_steps` env steps, then
+    published (the last complete window is what is logged in between):
+      - vx_ratio_<b>: mean forward speed / commanded speed for |vx cmd| ∈ b ± 0.05,
+        |vy cmd| < 0.1, |wz cmd| < 0.3 (≈ straight walking), upright, not standing;
+      - stride_hz_<b>: 1 / mean(last air time + last contact time), both feet, same frames.
+        1/mean, not mean of 1/period: short contact flickers (rough ground, pushes) made the
+        mean of reciprocals read 7-11 Hz for a policy that walks at ≈ 2.9 Hz (pilot slgx1nys);
+      - yaw_bias: mean signed (wz − wz_cmd) while walking |vx cmd| > 0.2 in non-heading
+        envs — a lopsided gait shows up here as a steady sign;
+      - lr_air_asym: |mean last air time L − R| / mean, while walking.
+    Buckets with no frames publish NaN."""
+
+    BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5)
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        n_b = len(self.BUCKETS)
+        dev = env.device
+        self.acc = {
+            "vx": torch.zeros(n_b, device=dev), "period": torch.zeros(n_b, device=dev),
+            "n": torch.zeros(n_b, device=dev), "n_hz": torch.zeros(n_b, device=dev),
+            "yaw": torch.zeros((), device=dev), "n_yaw": torch.zeros((), device=dev),
+            "air_l": torch.zeros((), device=dev), "air_r": torch.zeros((), device=dev),
+            "n_air": torch.zeros((), device=dev),
+        }
+        self.window_start = 0
+        self.published: dict[str, float] = self._publish()  # NaN until the first window closes
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        env_ids: torch.Tensor | slice,
+        command_name: str,
+        sensor_name: str,
+        window_steps: int = 50 * 24,
+        gate_tilt_above_deg: float = 40.0,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> dict[str, float]:
+        del env_ids
+        term = env.command_manager.get_term(command_name)
+        asset: Entity = env.scene[asset_cfg.name]
+        cmd = term.command
+        ok = _walk_v2_straight_mask(env, cmd, term, asset, gate_tilt_above_deg)
+        vx = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 0], nan=0.0)
+        wz = torch.nan_to_num(asset.data.root_link_ang_vel_b[:, 2], nan=0.0)
+        data = env.scene[sensor_name].data
+        air, con = data.last_air_time, data.last_contact_time  # (N, 2) feet L, R
+        period = air + con
+        valid_hz = (air > 0) & (con > 0)
+        straight = ok & (cmd[:, 1].abs() < 0.1) & (cmd[:, 2].abs() < 0.3)
+        a = self.acc
+        for i, b in enumerate(self.BUCKETS):
+            m = (straight & ((cmd[:, 0].abs() - b).abs() < 0.05)).float()
+            a["vx"][i] += (m * vx * torch.sign(cmd[:, 0]) / b).sum()
+            a["n"][i] += m.sum()
+            mh = m.unsqueeze(1) * valid_hz.float()
+            a["period"][i] += (mh * period).sum()
+            a["n_hz"][i] += mh.sum()
+        walking = ok & (cmd[:, 0].abs() > 0.2)
+        my = (walking & ~term.is_heading_env).float()
+        a["yaw"] += (my * (wz - cmd[:, 2])).sum()
+        a["n_yaw"] += my.sum()
+        ma = walking.float()
+        a["air_l"] += (ma * air[:, 0]).sum()
+        a["air_r"] += (ma * air[:, 1]).sum()
+        a["n_air"] += ma.sum()
+        if env.common_step_counter - self.window_start >= window_steps:
+            self.window_start = env.common_step_counter
+            self.published = self._publish()
+            for v in a.values():
+                v.zero_()
+        return self.published
+
+    def _publish(self) -> dict[str, float]:
+        a = {k: v.detach().cpu() for k, v in self.acc.items()}
+        nan = float("nan")
+        out: dict[str, float] = {}
+        for i, b in enumerate(self.BUCKETS):
+            tag = f"{b:.1f}"
+            out[f"vx_ratio_{tag}"] = float(a["vx"][i] / a["n"][i]) if a["n"][i] > 0 else nan
+            out[f"stride_hz_{tag}"] = float(a["n_hz"][i] / a["period"][i]) if a["n_hz"][i] > 0 else nan
+        out["yaw_bias"] = float(a["yaw"] / a["n_yaw"]) if a["n_yaw"] > 0 else nan
+        if a["n_air"] > 0:
+            l, r = float(a["air_l"] / a["n_air"]), float(a["air_r"] / a["n_air"])
+            out["lr_air_asym"] = abs(l - r) / max(0.5 * (l + r), 1e-6)
+        else:
+            out["lr_air_asym"] = nan
+        return out
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        pass  # windows are global, not per env
