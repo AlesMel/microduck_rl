@@ -4740,6 +4740,15 @@ def face_down_prob_curriculum(
     return torch.tensor([current_prob])
 
 
+def _qpos_heading(robot, env_ids) -> torch.Tensor:
+    """World heading of the free-joint root from qpos (wxyz quat): current right after a
+    reset writes the root state, unlike data.heading_w, which reads xquat and is stale
+    until the next sim.forward()."""
+    quat = robot.data.data.qpos[env_ids][:, robot.indexing.free_joint_q_adr[3:7]]
+    forward = quat_apply(quat, robot.data.forward_vec_b[env_ids])
+    return torch.atan2(forward[:, 1], forward[:, 0])
+
+
 class VelocityCommandCommandOnly(UniformVelocityCommand):
     """Like UniformVelocityCommand but only draws the command arrows (no actual velocity arrows)."""
 
@@ -4750,10 +4759,14 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
         # just turn at the clipped rate. Drawn near the CURRENT heading instead, they spend
         # their time on small corrective yaw commands while walking — the runtime heading
         # loop's regime (wz = stiffness · heading error).
+        # The heading is read from qpos, not heading_w: on an episode reset this runs before
+        # sim.forward(), so heading_w (from xquat) still holds the PRE-reset orientation while
+        # reset_base has already written a random yaw into qpos — every heading env then
+        # started its episode with a random heading error (found 2026-10-28, Walk v2 smoke).
         rel = getattr(self.cfg, "heading_target_rel_range", None)
         if self.cfg.heading_command and rel is not None:
             r = torch.empty(len(env_ids), device=self.device).uniform_(*rel)
-            self.heading_target[env_ids] = wrap_to_pi(self.robot.data.heading_w[env_ids] + r)
+            self.heading_target[env_ids] = wrap_to_pi(_qpos_heading(self.robot, env_ids) + r)
         # Turn-in-place practice: for a fraction of envs, zero the linear velocity
         # and force a meaningful (away-from-zero) yaw command. Independent uniform
         # sampling almost never produces "lin≈0, |ang| large" (~2% of samples), so

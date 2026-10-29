@@ -493,6 +493,20 @@ def test_heading_envs_wired():
         assert off["fwd"][-1] > 0 and off["back"][-1] > 0                     # the teacher turns right at speed
 
 
+def _fake_root(heading, stale_heading_w=None):
+    """Free-joint root whose qpos holds yaw `heading`; heading_w (xquat-derived) may be stale."""
+    n = heading.shape[0]
+    qpos = torch.zeros(n, 7)
+    qpos[:, 3] = torch.cos(heading / 2)
+    qpos[:, 6] = torch.sin(heading / 2)
+    data = SimpleNamespace(
+        data=SimpleNamespace(qpos=qpos),
+        forward_vec_b=torch.tensor([[1.0, 0.0, 0.0]]).repeat(n, 1),
+        heading_w=heading if stale_heading_w is None else stale_heading_w,
+    )
+    return SimpleNamespace(data=data, indexing=SimpleNamespace(free_joint_q_adr=torch.arange(7)))
+
+
 def _heading_cmd(n, heading, p_heading, p_turn):
     cfg = microduck_mdp.VelocityCommandCommandOnlyCfg(
         entity_name="robot", resampling_time_range=(3.0, 8.0), heading_command=True,
@@ -503,7 +517,7 @@ def _heading_cmd(n, heading, p_heading, p_turn):
     term = microduck_mdp.VelocityCommandCommandOnly.__new__(microduck_mdp.VelocityCommandCommandOnly)
     term._env = SimpleNamespace(num_envs=n, device="cpu")
     term.cfg = cfg
-    term.robot = SimpleNamespace(data=SimpleNamespace(heading_w=heading))
+    term.robot = _fake_root(heading)
     term.vel_command_b = torch.zeros(n, 3); term.vel_command_w = torch.zeros(n, 3)
     term.heading_target = torch.zeros(n); term.heading_error = torch.zeros(n)
     for f in ("is_heading_env", "is_standing_env", "is_world_env", "is_forward_env"):
@@ -520,6 +534,18 @@ def test_heading_targets_drawn_near_current_heading():
     d = wrap_to_pi(term.heading_target - heading)
     assert d.abs().max() <= 0.5 + 1e-5 and d.std() > 0.2 and term.is_heading_env.all()
     assert (term.heading_target.abs() <= math.pi + 1e-5).all()               # wrapped across ±π
+
+
+def test_heading_targets_use_the_reset_pose_not_stale_xquat():
+    # On an episode reset the command is resampled before sim.forward(): qpos already holds
+    # the new random yaw, heading_w still the old one. Targets must follow qpos.
+    n = 500
+    heading = torch.linspace(-3.0, 3.0, n)
+    term = _heading_cmd(n, heading, 1.0, 0.0)
+    term.robot = _fake_root(heading, stale_heading_w=torch.zeros(n))
+    term._resample_command(torch.arange(n))
+    from mjlab.utils.lab_api.math import wrap_to_pi
+    assert wrap_to_pi(term.heading_target - heading).abs().max() <= 0.5 + 1e-4
 
 
 def test_turn_in_place_envs_leave_heading_mode():
