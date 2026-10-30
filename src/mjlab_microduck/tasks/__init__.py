@@ -39,6 +39,13 @@ from .microduck_walk_v2_env_cfg import (
     make_microduck_walk_v2_env_cfg,
     MicroduckWalkV2RlCfg,
 )
+from .microduck_walk_v2_terrain_env_cfg import (
+    make_microduck_walk_v2_terrain_env_cfg,
+    MicroduckWalkV2TerrainRlCfg,
+    MicroduckWalkV2StairsRlCfg,
+    MicroduckWalkV2StairsFinetuneRlCfg,
+    MicroduckWalkV2StairsV2RlCfg,
+)
 from .microduck_ground_pick_env_cfg import (
     make_microduck_ground_pick_env_cfg,
     MicroduckGroundPickRlCfg,
@@ -129,6 +136,43 @@ register_mjlab_task(
     env_cfg=make_microduck_walk_v2_env_cfg(rough=True),
     play_env_cfg=make_microduck_walk_v2_env_cfg(play=True, rough=True),
     rl_cfg=MicroduckWalkV2RlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# WalkV2 on the IsaacLab-style duck-scaled terrain grid (microduck_terrains.py):
+# the full mix, and a stairs-only menu (straight small steps + pyramids). Untrained.
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-Terrain-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True),
+    rl_cfg=MicroduckWalkV2TerrainRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-Stairs-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs"),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs"),
+    rl_cfg=MicroduckWalkV2StairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Warm start from the walk-v2 checkpoint (MICRODUCK_WARM_START=1 + --agent.resume True):
+# inherited curricula pinned final, only the terrain ladder climbs.
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-Stairs-Finetune-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs"),
+    rl_cfg=MicroduckWalkV2StairsFinetuneRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StairsV2 — survival ladder, spawns on the steps, wide apron (warm start as above).
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-StairsV2-Finetune-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs"),
+    rl_cfg=MicroduckWalkV2StairsV2RlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -281,6 +325,10 @@ _BACKLASH_TASKS = (
     ("Mjlab-VelStand-Rough-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {"rough": True}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-WalkV2-Flat-Backlash-MicroDuck", make_microduck_walk_v2_env_cfg, {}, MicroduckWalkV2RlCfg, _BL_WALK),
     ("Mjlab-WalkV2-Rough-Backlash-MicroDuck", make_microduck_walk_v2_env_cfg, {"rough": True}, MicroduckWalkV2RlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-Terrain-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {}, MicroduckWalkV2TerrainRlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-Stairs-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs"}, MicroduckWalkV2StairsRlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-Stairs-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True}, MicroduckWalkV2StairsFinetuneRlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-StairsV2-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True}, MicroduckWalkV2StairsV2RlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),

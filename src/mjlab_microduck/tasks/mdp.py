@@ -3643,6 +3643,192 @@ def com_range_curriculum(
     return torch.tensor([current_range])
 
 
+def terrain_levels_first_reset_guarded(
+    env, env_ids: "torch.Tensor", command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> dict:
+    """mjlab's ``terrain_levels_vel`` (walk half a tile → up a row, under half the commanded
+    distance → down a row) with its first call neutralised.
+
+    Measured 2026-10-29 on the walk-v2 stairs task: before the very first reset every robot
+    still sits at the world origin, metres from its tile origin, so the stock rule reads a
+    "distance walked" of several metres and promotes ALL robots one row at iteration 0 —
+    ``max_init_terrain_level = 0`` silently became "start on row 1". Mid-episode resets never
+    happen at ``common_step_counter == 0`` (it increments every step before terminations are
+    applied), so the guard only ever removes that first call.
+    """
+    from mjlab.tasks.velocity.mdp.curriculums import terrain_levels_vel
+
+    terrain = env.scene.terrain
+    if env.common_step_counter > 0:
+        return terrain_levels_vel(env, env_ids, command_name, asset_cfg)
+    # First reset: report the levels, move nobody.
+    levels = terrain.terrain_levels.float()
+    result = {"mean": torch.mean(levels), "max": torch.max(levels)}
+    gen = terrain.cfg.terrain_generator
+    names = list(gen.sub_terrains.keys())
+    if terrain.terrain_origins.shape[1] == len(names):
+        for i, name in enumerate(names):
+            mask = terrain.terrain_types == i
+            if mask.any():
+                result[name] = torch.mean(levels[mask])
+    return result
+
+
+def terrain_levels_survival(
+    env, env_ids: "torch.Tensor", min_tracking: float = 0.55, reward_name: str = "track_linear_velocity",
+    min_progress: float = 0.0, command_name: str = "twist", still_threshold: float = 0.05,
+    demote_no_progress: bool = False,
+) -> dict:
+    """Terrain ladder promoted on how the episode went, not on metres from the spawn.
+
+    mjlab's stock rule (``terrain_levels_vel``) promotes a robot only when it ends an episode more
+    than half a tile from its spawn. With random command directions, turning, heading and
+    standing episodes that rarely happens: the walk-v2 stairs fine-tune f3u8hzan (2026-10-29)
+    sat at a mean level of 1.5 of 9 for 3000 iterations — even its FLAT column never climbed —
+    and the policy never saw the taller steps. Ported from the 2026-08 hostile-terrain branch
+    (``hostile_terrain_levels``), which hit the same wall.
+
+    Rule:
+      * the episode ended by a FALL (``fell_over``)                                  → one row DOWN;
+      * it ran its full length AND earned ≥ ``min_tracking`` of the maximum speed-tracking
+        reward on average (AND, with ``min_progress`` > 0, moved ≥ min_progress × |v_cmd| × T
+        metres from its spawn, unless commanded to stand)                           → one row UP;
+      * with ``demote_no_progress``, surviving a walk command without that progress → DOWN;
+      * anything else → stay.
+    Runs at reset BEFORE the termination flags and reward sums of those envs are cleared. The
+    very first reset has every flag False, so nobody moves (no iteration-0 artefact). Robots that
+    top out are re-dealt to a random row by ``update_env_origins``.
+    Logged as ``Curriculum/terrain_levels/{mean,max,promoted,demoted}``.
+    """
+    terrain = env.scene.terrain
+    assert terrain is not None
+    fell = env.termination_manager.get_term("fell_over")[env_ids]
+    timed_out = env.termination_manager.get_term("time_out")[env_ids]
+    sums = env.reward_manager._episode_sums[reward_name][env_ids]        # weighted reward · s
+    weight = float(env.reward_manager.get_term_cfg(reward_name).weight)
+    max_sum = max(weight, 1e-6) * float(env.max_episode_length_s)
+    tracking = sums / max_sum                                              # 0..1
+    move_up = timed_out & (~fell) & (tracking >= min_tracking)
+    progressed = None
+    if min_progress > 0.0:
+        asset = env.scene["robot"]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None
+        v_cmd = torch.norm(command[env_ids, :2], dim=1)
+        moved = torch.norm(asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1)
+        needed = min_progress * v_cmd * float(env.max_episode_length_s)
+        progressed = (moved >= needed) | (v_cmd < still_threshold)
+        move_up = move_up & progressed
+    move_down = fell & (~move_up)
+    if progressed is not None and demote_no_progress:
+        move_down = move_down | (timed_out & (~fell) & (~progressed))
+    terrain.update_env_origins(env_ids, move_up, move_down)
+    levels = terrain.terrain_levels.float()
+    return {
+        "mean": torch.mean(levels),
+        "max": torch.max(levels),
+        "promoted": move_up.float().mean(),
+        "demoted": move_down.float().mean(),
+    }
+
+
+def build_terrain_height_lookup(mj_model, centers_xy, span: float, res: float, flat_tol: float = 0.03):
+    """Ray-cast the ground height on a square grid around each patch centre (CPU MuJoCo, once).
+
+    Returns (heights [P, n, n], allowed [P, n, n], offsets [n]): ``heights`` is the LOCAL MAXIMUM
+    of the surface over a 3×3-cell neighbourhood (a robot placed there hangs at most one cell
+    of bump above ground, never inside it); ``allowed`` marks cells whose neighbourhood height
+    range is ≤ ``flat_tol`` (no foot straddling a step edge at spawn). Robot geoms are moved
+    50 m up first so the rays only hit the ground.
+    """
+    import mujoco as _mj
+
+    data = _mj.MjData(mj_model)
+    _mj.mj_resetData(mj_model, data)
+    for j in range(mj_model.njnt):
+        if mj_model.jnt_type[j] == _mj.mjtJoint.mjJNT_FREE:
+            data.qpos[mj_model.jnt_qposadr[j] + 2] += 50.0
+    _mj.mj_forward(mj_model, data)
+    offsets = np.arange(-span, span + 1e-9, res, dtype=np.float32)
+    n = len(offsets)
+    geomid = np.zeros(1, np.int32)
+    raw = np.zeros((len(centers_xy), n, n), np.float32)
+    down = np.array([0.0, 0.0, -1.0])
+    for p_, (cx, cy) in enumerate(centers_xy):
+        for i, dx in enumerate(offsets):
+            for j, dy in enumerate(offsets):
+                dist = _mj.mj_ray(mj_model, data, np.array([cx + dx, cy + dy, 10.0]), down, None, 1, -1, geomid)
+                raw[p_, i, j] = 10.0 - dist if dist >= 0 else np.nan
+    raw = np.where(np.isnan(raw), np.nanmin(raw), raw)
+    pad = np.pad(raw, ((0, 0), (1, 1), (1, 1)), mode="edge")
+    stack = np.stack([pad[:, 1 + di:n + 1 + di, 1 + dj:n + 1 + dj] for di in (-1, 0, 1) for dj in (-1, 0, 1)])
+    heights = stack.max(axis=0)
+    allowed = (stack.max(axis=0) - stack.min(axis=0)) <= flat_tol
+    return heights.astype(np.float32), allowed, offsets
+
+
+class reset_root_on_terrain:
+    """Reset event: put the robot at a RANDOM usable spot of its terrain patch (any tread of the
+    stairs, any bump of the rubble), facing a random direction, standing on the local ground.
+
+    Why: the policy is blind (no height map), so with a fixed spawn it can learn WHERE the
+    obstacles are instead of how to handle them, and it only ever meets the stairs from the
+    platform. Random spawns remove that regularity and put robots on the steps themselves, so
+    the higher ladder rows get on-policy data from the first iteration. The ground height comes
+    from a lookup built once at startup (:func:`build_terrain_height_lookup`) on the env's own
+    compiled model; ``terrain_generator.seed`` must be fixed so every process builds the same
+    terrain. Cells whose neighbourhood is not flat within ``flat_tol`` (step edges) are not
+    used; if none of ``candidates`` random cells is usable the patch origin is used.
+    (Ported from the 2026-08 hostile-terrain branch.)
+    """
+
+    def __init__(self, cfg, env):
+        terrain = env.scene.terrain
+        assert terrain is not None and terrain.terrain_origins is not None, "reset_root_on_terrain needs a generated terrain"
+        gen = terrain.cfg.terrain_generator
+        assert gen is not None and gen.seed is not None, "set terrain_generator.seed so the CPU lookup matches the GPU terrain"
+        span = float(cfg.params.get("span", gen.size[0] / 2 - 0.3))
+        res = float(cfg.params.get("res", 0.05))
+        flat_tol = float(cfg.params.get("flat_tol", 0.03))
+        origins = terrain.terrain_origins                                  # [rows, cols, 3]
+        rows, cols = origins.shape[0], origins.shape[1]
+        centers = origins.reshape(-1, 3)[:, :2].cpu().numpy()
+        heights, allowed, offsets = build_terrain_height_lookup(env.sim.mj_model, centers, span, res, flat_tol)
+        self.rows, self.cols = rows, cols
+        self.heights = torch.as_tensor(heights, device=env.device)
+        self.allowed = torch.as_tensor(allowed, device=env.device)
+        self.offsets = torch.as_tensor(offsets, device=env.device)
+        self.n = len(offsets)
+        print(f"[reset_root_on_terrain] lookup {rows}×{cols} patches × {self.n}² cells, "
+              f"{100 * allowed.mean():.0f} % usable cells (neighbourhood height range ≤ {flat_tol * 100:.0f} cm)")
+
+    def __call__(self, env, env_ids: "torch.Tensor", span: float = 1.7, res: float = 0.05, flat_tol: float = 0.03,
+                 yaw_range: tuple = (-math.pi, math.pi), z_clearance: tuple = (0.125, 0.135), candidates: int = 8,
+                 asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> None:
+        del span, res, flat_tol  # consumed at init
+        asset = env.scene[asset_cfg.name]
+        terrain = env.scene.terrain
+        N = len(env_ids)
+        dev = env.device
+        patch = terrain.terrain_levels[env_ids] * self.cols + terrain.terrain_types[env_ids]
+        cand = torch.randint(0, self.n, (N, candidates, 2), device=dev)
+        ok = self.allowed[patch.unsqueeze(1), cand[..., 0], cand[..., 1]]   # [N, candidates]
+        has = ok.any(dim=1)
+        first = torch.argmax(ok.int(), dim=1)
+        ij = cand[torch.arange(N, device=dev), first]
+        centre = (self.n - 1) // 2
+        ij = torch.where(has.unsqueeze(1), ij, torch.full_like(ij, centre))
+        dx, dy = self.offsets[ij[:, 0]], self.offsets[ij[:, 1]]
+        h = self.heights[patch, ij[:, 0], ij[:, 1]]
+        origins = env.scene.env_origins[env_ids]
+        z = h + torch.empty(N, device=dev).uniform_(*z_clearance)
+        pos = torch.stack([origins[:, 0] + dx, origins[:, 1] + dy, z], dim=1)
+        yaw = torch.empty(N, device=dev).uniform_(*yaw_range)
+        quat = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=1)
+        asset.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=1), env_ids=env_ids)
+        asset.write_root_link_velocity_to_sim(torch.zeros(N, 6, device=dev), env_ids=env_ids)
+
+
 def slope_move_masks(distance: "torch.Tensor", size_x: float):
     """Masques de promotion/rétrogradation du curriculum de pente.
 
