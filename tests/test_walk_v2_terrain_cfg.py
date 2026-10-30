@@ -302,7 +302,8 @@ def test_v2_cfg():
     assert cfg.events["reset_base"].func is microduck_mdp.reset_root_on_terrain
     assert cfg.events["reset_base"].params["flat_tol"] == 0.02 and cfg.events["reset_base"].params["res"] == 0.04
     assert cfg.terminations["out_of_terrain_bounds"].params["margin"] == w2t.V2_BOUNDS_MARGIN
-    assert cfg.scene.terrain.max_init_terrain_level == 0
+    assert cfg.scene.terrain.max_init_terrain_level == w2t.V2_MAX_INIT_TERRAIN_LEVEL == 5   # run 3
+    assert w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True).scene.terrain.max_init_terrain_level == 0
     assert cfg.rewards["track_linear_velocity"].params["std"] == pytest.approx(math.sqrt(0.1))  # the 0.55 bar's curve
     # play cfg is the plain stairs play cfg (platform spawns, stock bounds)
     play = w2t.make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs", finetune=True, v2=True)

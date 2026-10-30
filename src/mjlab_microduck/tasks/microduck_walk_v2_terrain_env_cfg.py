@@ -59,6 +59,14 @@ rows get data from iteration 0 and the policy cannot memorise where the steps ar
 flat apron and a bounds margin that lets robots roam 5 m into it, so walking off the grid stops
 truncating episodes. Terrain seed fixed (V2_TERRAIN_SEED) for the lookup.
 
+RUN 2 (2026-10-29/30, urkui-3, Mjlab-WalkV2-StairsV2-Finetune-Backlash-MicroDuck from run 1's
+model_2999, 2048 envs, 3000 it, wandb 4y1g919r): reward 105-120, gait unchanged, every penalty
+≤ 0, out_of_terrain_bounds 0.0 throughout. Survival ladder: promoted 0.35-0.5 / demoted
+0.45-0.6 of resets, mean level 0 → 2.1 by it 1250 then an EQUILIBRIUM at ≈ 2 (robots reach
+row 3+, fall, come back). model_2999 on the stairs: 0.5-2.4 cm steps crossed (1.7-2.4 cm: up,
+over the landing and down with one fall — new), 2.4-3.0 cm: onto the first flight then falls.
+RUN 3 = run 2 + V2_MAX_INIT_TERRAIN_LEVEL 0 → 5, from run 2's model_2999.
+
 Preview the terrain with the robot standing on it, and check that every spawn is a stable
 stance, with::
 
@@ -101,6 +109,9 @@ V2_BORDER_WIDTH = 6.0           # m, flat apron (was 2.0)
 V2_BOUNDS_MARGIN = -5.0         # m, negative = robots may roam this far INTO the apron before truncation
 V2_MIN_TRACKING = 0.55          # fraction of the max track_linear_velocity reward (std² = 0.1) to be promoted
 V2_MIN_PROGRESS = 0.3           # fraction of |v_cmd| × T that must be covered (anti-circling)
+V2_MAX_INIT_TERRAIN_LEVEL = 5   # run 3: start rows spread over 0-5 (steps up to ≈ 2 cm) — run 2's ladder
+                                # settled at row 2 with everyone starting on row 0; the tall rows only ever
+                                # saw freshly promoted robots that fell straight back (see RUN 2 below)
 V2_SPAWN = {"span": PATCH_SIZE / 2 - 0.3, "res": 0.04, "flat_tol": 0.02,
             "yaw_range": (-math.pi, math.pi), "z_clearance": (0.125, 0.135), "candidates": 8}
 
@@ -138,6 +149,7 @@ def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaa
     cfg.curriculum["terrain_levels"].func = microduck_mdp.terrain_levels_first_reset_guarded
 
     if v2 and not play:
+        cfg.scene.terrain.max_init_terrain_level = V2_MAX_INIT_TERRAIN_LEVEL
         cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
             func=microduck_mdp.terrain_levels_survival,
             params={"min_tracking": V2_MIN_TRACKING, "min_progress": V2_MIN_PROGRESS,
