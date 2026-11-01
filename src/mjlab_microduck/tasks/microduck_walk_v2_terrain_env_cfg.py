@@ -96,6 +96,31 @@ battery voltage in the DR range):
     (feet_swing_apex_reward, the ``apex`` option) and torque-reserve pressure, as a separate
     hot-swapped policy; the fast flat walk cannot be both.
 
+RUN 4 — STAIRS MODE (2026-11-01, Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck from run 3's
+model_2999, 2048 envs, 3000 it, wandb ljdgj6pq): vx ≤ 0.3, swing_apex 5.0, torque_headroom −3.0
+(reserve 0.7). Reward 124, ep_len 850, every penalty ≤ 0. Ladder 3.0 by it 300 and 3.4-3.6 from
+it 1500 on (runs 2-3 sat at 2.1-2.3). swing_apex paid 0.22/step; torque_headroom read −0.044/step
+at it 84 AND at it 2999 — the policy paid the cost rather than lowering knee torque.
+Feasibility on model_2999 (64 robots, 0.64 N·m cap):
+  - the apex reward WORKED: flat p10/median 1.5/2.0 cm at 0.1 m/s, 2.5/2.9 at 0.2, 2.9/3.3 at 0.3
+    (run 3: 0.6/1.3, 1.8/2.0, 2.2/2.6) — +0.7-1.0 cm at every speed;
+  - the headroom cost did NOT buy reserve: flat knee p99 0.82 at 0.2 and 0.91 at 0.3 (run 3:
+    0.73, 0.86) — higher swings cost torque, and −3.0 against a ≈ 125 stack is noise;
+  - stairs at 0.3 m/s: rows 0-1 0/11 fell, row 2 (1.7-2.4 cm) 2/9 fell (run 3: 9/11), both on
+    the up flight; row 3 (2.4-3.0 cm) 8/8 fell, 10 falls on the approach + 20 on the up flight,
+    knee at the cap 23 % of the 0.3 s before a fall, last swing apex before a fall 3.5 cm —
+    clearance is NOT what fails on row 3, the step-up torque is;
+  - 0.2 m/s is WORSE than 0.3 (row 2 4/9, row 3 6/8): the apex drops to 2.0-3.0 cm there and
+    the knee is still at the cap before every fall (25 %). Slower does not help on its own.
+  - 14 s video (scripts/view_terrain_env.py, 28 robots): rows 0-1 all crossed, row 2 7/9
+    (the 2 falls on the far, DOWN flight), row 3 0/8.
+Where this leaves the stairs: ≈ 2 cm risers at 0.3 m/s are the reliable spec for this policy,
+2.4-3.0 cm is bounded by the XL330's 1.75 A current cap during the step-up (hip and knee p99 =
+1.00 on those rows in every run). The one cheap experiment left on the RL side is a headroom
+weight that actually competes (−3 → −10..−15, or reserve 0.6) to see whether the cap-hugging is
+habit or necessity — if the knee still sits at 1.00 before falls, the ceiling is hardware (mass,
+gearing, or a higher current limit on the real servo), not the gait.
+
 Preview the terrain with the robot standing on it, and check that every spawn is a stable
 stance, with::
 
