@@ -47,6 +47,8 @@ from .microduck_walk_v2_terrain_env_cfg import (
     MicroduckWalkV2StairsV2RlCfg,
     MicroduckWalkV2StairsApexRlCfg,
     MicroduckWalkV2StairsModeRlCfg,
+    MicroduckWalkV2StairsModeHRRlCfg,
+    MODE_HEADROOM_WEIGHT_HR,
 )
 from .microduck_ground_pick_env_cfg import (
     make_microduck_ground_pick_env_cfg,
@@ -193,6 +195,15 @@ register_mjlab_task(
     env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, apex=True, stairs_mode=True),
     play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs", apex=True, stairs_mode=True),
     rl_cfg=MicroduckWalkV2StairsModeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StairsModeHR — stairs mode with a torque-headroom weight that competes (run 5: −12 vs −3).
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-StairsModeHR-Finetune-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, apex=True, stairs_mode=True, headroom_weight=MODE_HEADROOM_WEIGHT_HR),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs", apex=True, stairs_mode=True, headroom_weight=MODE_HEADROOM_WEIGHT_HR),
+    rl_cfg=MicroduckWalkV2StairsModeHRRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -351,6 +362,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-WalkV2-StairsV2-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True}, MicroduckWalkV2StairsV2RlCfg, _BL_WALK),
     ("Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True}, MicroduckWalkV2StairsApexRlCfg, _BL_WALK),
     ("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True}, MicroduckWalkV2StairsModeRlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True, "headroom_weight": MODE_HEADROOM_WEIGHT_HR}, MicroduckWalkV2StairsModeHRRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),

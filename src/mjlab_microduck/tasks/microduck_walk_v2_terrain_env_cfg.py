@@ -178,6 +178,7 @@ APEX_MIN_AIR_TIME = 0.06        # s, a landing counts only after this long in th
 MODE_VX_MAX = 0.3               # m/s, the gait keeps knee headroom below this (p99 0.86 of the cap at 0.3)
 MODE_HEADROOM_RESERVE = 0.7     # cost starts at 70 % of the current cap (0.45 N·m), reaches 1 at the cap
 MODE_HEADROOM_WEIGHT = -3.0     # mjlab-style cost (≥ 0) → negative weight
+MODE_HEADROOM_WEIGHT_HR = -12.0  # run 5: 4× — run 4 paid −0.044/step at −3 and never left the cap
 
 ENABLE_TIGHT_SPAWN = True
 SPAWN_XY = 0.2                  # m, ± offset from the tile's spawn origin
@@ -189,7 +190,7 @@ HIP_ROLL_STD = 0.12             # rad, walking/running tiers (recipe: 0.05); sta
 
 def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaaclab",
                                            finetune: bool = False, v2: bool = False, apex: bool = False,
-                                           stairs_mode: bool = False):
+                                           stairs_mode: bool = False, headroom_weight: float = MODE_HEADROOM_WEIGHT):
     if menu not in TERRAIN_MENUS:
         raise ValueError(f"menu must be one of {sorted(TERRAIN_MENUS)}, got {menu!r}")
     cfg = make_microduck_walk_v2_env_cfg(play=play, rough=True)
@@ -233,7 +234,7 @@ def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaa
         cfg.curriculum.pop("vx_range", None)
         cfg.rewards["torque_headroom"] = RewardTermCfg(
             func=microduck_mdp.actuator_torque_headroom_cost,
-            weight=MODE_HEADROOM_WEIGHT,
+            weight=headroom_weight,
             params={"reserve": MODE_HEADROOM_RESERVE},
         )
 
@@ -283,3 +284,6 @@ MicroduckWalkV2StairsApexRlCfg.run_name = "walk_v2_stairs_apex"
 
 MicroduckWalkV2StairsModeRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
 MicroduckWalkV2StairsModeRlCfg.run_name = "walk_v2_stairs_mode"
+
+MicroduckWalkV2StairsModeHRRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
+MicroduckWalkV2StairsModeHRRlCfg.run_name = "walk_v2_stairs_mode_hr"

@@ -29,8 +29,10 @@ TASKS = (
     "Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck",
     "Mjlab-WalkV2-StairsMode-Finetune-MicroDuck",
     "Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck",
+    "Mjlab-WalkV2-StairsModeHR-Finetune-MicroDuck",
+    "Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck",
 )
-EXPERIMENT = {"Terrain": "walk_v2_terrain", "Stairs": "walk_v2_stairs", "StairsV2": "walk_v2_stairs", "StairsApex": "walk_v2_stairs", "StairsMode": "walk_v2_stairs"}
+EXPERIMENT = {"Terrain": "walk_v2_terrain", "Stairs": "walk_v2_stairs", "StairsV2": "walk_v2_stairs", "StairsApex": "walk_v2_stairs", "StairsMode": "walk_v2_stairs", "StairsModeHR": "walk_v2_stairs"}
 
 
 def _terrain_spec():
@@ -443,3 +445,14 @@ def test_stairs_mode_cfg():
     with pytest.raises(AssertionError):
         w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, stairs_mode=True)
     assert load_rl_cfg("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck").run_name == "walk_v2_stairs_mode"
+
+
+def test_stairs_mode_hr_cfg():
+    for task in ("Mjlab-WalkV2-StairsModeHR-Finetune-MicroDuck", "Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck"):
+        cfg = load_env_cfg(task, play=False)
+        t = cfg.rewards["torque_headroom"]
+        assert t.weight == w2t.MODE_HEADROOM_WEIGHT_HR < w2t.MODE_HEADROOM_WEIGHT < 0
+        assert t.params["reserve"] == w2t.MODE_HEADROOM_RESERVE and "swing_apex" in cfg.rewards
+        assert load_rl_cfg(task).run_name == "walk_v2_stairs_mode_hr"
+    base = load_env_cfg("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck", play=False)
+    assert base.rewards["torque_headroom"].weight == w2t.MODE_HEADROOM_WEIGHT
