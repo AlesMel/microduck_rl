@@ -27,8 +27,10 @@ TASKS = (
     "Mjlab-WalkV2-StairsV2-Finetune-Backlash-MicroDuck",
     "Mjlab-WalkV2-StairsApex-Finetune-MicroDuck",
     "Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck",
+    "Mjlab-WalkV2-StairsMode-Finetune-MicroDuck",
+    "Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck",
 )
-EXPERIMENT = {"Terrain": "walk_v2_terrain", "Stairs": "walk_v2_stairs", "StairsV2": "walk_v2_stairs", "StairsApex": "walk_v2_stairs"}
+EXPERIMENT = {"Terrain": "walk_v2_terrain", "Stairs": "walk_v2_stairs", "StairsV2": "walk_v2_stairs", "StairsApex": "walk_v2_stairs", "StairsMode": "walk_v2_stairs"}
 
 
 def _terrain_spec():
@@ -408,3 +410,36 @@ def test_apex_cfg_and_tasks():
     assert "low_swing" in cfg.rewards and cfg.curriculum["terrain_levels"].func is microduck_mdp.terrain_levels_survival
     assert "swing_apex" not in w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True).rewards
     assert load_rl_cfg("Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck").run_name == "walk_v2_stairs_apex"
+
+
+# ── torque headroom cost + stairs mode ───────────────────────────────────────
+
+def test_torque_headroom_cost_is_zero_below_reserve_and_one_at_the_cap():
+    n = 3
+    tau = torch.zeros(n, 14)
+    tau[0, list(microduck_mdp.LEG_ACTUATORS)] = 0.40          # 62 % of a 0.64 cap: free
+    tau[1, list(microduck_mdp.LEG_ACTUATORS)] = 0.64          # at the cap on every leg servo: 1
+    tau[2, 3] = 0.64                                           # one knee at the cap: 1/10
+    tau[2, 6] = 0.64                                           # a head servo: ignored
+    robot = SimpleNamespace(data=SimpleNamespace(actuator_force=tau), actuators=[])
+    scene = type("Scene", (), {"__getitem__": lambda self, k: robot})()
+    env = SimpleNamespace(num_envs=n, device="cpu", scene=scene)
+    term = microduck_mdp.actuator_torque_headroom_cost(SimpleNamespace(params={"cap_nm": 0.64}), env)
+    out = term(env, reserve=0.7)
+    assert out.tolist() == pytest.approx([0.0, 1.0, 0.1])
+    # halfway between reserve and cap → (0.5)² = 0.25
+    tau[0, list(microduck_mdp.LEG_ACTUATORS)] = 0.64 * 0.85
+    assert term(env, reserve=0.7)[0].item() == pytest.approx(0.25, abs=1e-5)
+
+
+def test_stairs_mode_cfg():
+    cfg = w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, apex=True, stairs_mode=True)
+    assert cfg.commands["twist"].ranges.lin_vel_x == (-w2t.MODE_VX_MAX, w2t.MODE_VX_MAX) and "vx_range" not in cfg.curriculum
+    t = cfg.rewards["torque_headroom"]
+    assert t.func is microduck_mdp.actuator_torque_headroom_cost and t.weight == w2t.MODE_HEADROOM_WEIGHT < 0
+    assert t.params["reserve"] == w2t.MODE_HEADROOM_RESERVE
+    assert "swing_apex" in cfg.rewards and cfg.curriculum["terrain_levels"].func is microduck_mdp.terrain_levels_survival
+    assert cfg.events["reset_base"].func is microduck_mdp.reset_root_on_terrain
+    with pytest.raises(AssertionError):
+        w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, stairs_mode=True)
+    assert load_rl_cfg("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck").run_name == "walk_v2_stairs_mode"

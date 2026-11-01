@@ -149,6 +149,11 @@ APEX_TARGET = 0.035             # m, = FOOT_TARGET_HEIGHT: clears a 3 cm riser w
 APEX_WEIGHT = 5.0               # ≈ 6 landings/s × ≤ 1 each → up to ≈ 0.6/step, the air_time term's mass
 APEX_MIN_AIR_TIME = 0.06        # s, a landing counts only after this long in the air
 
+# stairs mode (run 4): a separate slow walk for rough ground — see FEASIBILITY in the docstring.
+MODE_VX_MAX = 0.3               # m/s, the gait keeps knee headroom below this (p99 0.86 of the cap at 0.3)
+MODE_HEADROOM_RESERVE = 0.7     # cost starts at 70 % of the current cap (0.45 N·m), reaches 1 at the cap
+MODE_HEADROOM_WEIGHT = -3.0     # mjlab-style cost (≥ 0) → negative weight
+
 ENABLE_TIGHT_SPAWN = True
 SPAWN_XY = 0.2                  # m, ± offset from the tile's spawn origin
 
@@ -158,7 +163,8 @@ HIP_ROLL_STD = 0.12             # rad, walking/running tiers (recipe: 0.05); sta
 
 
 def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaaclab",
-                                           finetune: bool = False, v2: bool = False, apex: bool = False):
+                                           finetune: bool = False, v2: bool = False, apex: bool = False,
+                                           stairs_mode: bool = False):
     if menu not in TERRAIN_MENUS:
         raise ValueError(f"menu must be one of {sorted(TERRAIN_MENUS)}, got {menu!r}")
     cfg = make_microduck_walk_v2_env_cfg(play=play, rough=True)
@@ -194,6 +200,17 @@ def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaa
             func=microduck_mdp.reset_root_on_terrain, mode="reset", params=dict(V2_SPAWN),
         )
         cfg.terminations["out_of_terrain_bounds"].params["margin"] = V2_BOUNDS_MARGIN
+
+    if stairs_mode:
+        assert apex, "stairs mode = slow + apex reward + torque headroom"
+        tw = cfg.commands["twist"]
+        tw.ranges.lin_vel_x = (-MODE_VX_MAX, MODE_VX_MAX)
+        cfg.curriculum.pop("vx_range", None)
+        cfg.rewards["torque_headroom"] = RewardTermCfg(
+            func=microduck_mdp.actuator_torque_headroom_cost,
+            weight=MODE_HEADROOM_WEIGHT,
+            params={"reserve": MODE_HEADROOM_RESERVE},
+        )
 
     if apex:
         low = cfg.rewards["low_swing"].params
@@ -238,3 +255,6 @@ MicroduckWalkV2StairsV2RlCfg.run_name = "walk_v2_stairs_v2"
 
 MicroduckWalkV2StairsApexRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
 MicroduckWalkV2StairsApexRlCfg.run_name = "walk_v2_stairs_apex"
+
+MicroduckWalkV2StairsModeRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
+MicroduckWalkV2StairsModeRlCfg.run_name = "walk_v2_stairs_mode"

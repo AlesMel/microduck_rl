@@ -5907,6 +5907,58 @@ class feet_swing_apex_reward:
         self.prev_contact[ids] = True
 
 
+LEG_ACTUATORS = (0, 1, 2, 3, 4, 9, 10, 11, 12, 13)
+"""Actuator (ctrl) indices of the ten leg servos: the family's fixed actuator order is
+left leg 0-4, head 5-8, right leg 9-13 on every model (passive joints have no actuator)."""
+
+
+class actuator_torque_headroom_cost:
+    """Cost for running the leg servos near their torque cap: mean over the leg actuators of
+    clamp((|τ| / cap − reserve) / (1 − reserve), 0, 1)², in [0, 1]. ≥ 0 → NEGATIVE weight.
+
+    ``cap`` is the tighter of BAM's firmware current limit (kt · max_current: 0.64 N·m for the
+    XL330's 1.75 A) and the voltage limit kt · vin / R at the env's battery voltage, read from
+    the BAM actuator at init (``cap_nm`` overrides it). Why (stairs feasibility, 2026-11-01):
+    the fast walk runs the knee at 86 % of the cap at 0.3 m/s and AT the cap at 0.5; on a
+    2-3 cm riser hip and knee saturate on the up flight and the robot falls with the feet
+    having cleared the step. Below ``reserve`` the cost is zero, so a gait that keeps
+    headroom pays nothing; demand at the cap costs 1 per step on that actuator."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        robot: Entity = env.scene["robot"]
+        cap = cfg.params.get("cap_nm")
+        n_act = len(LEG_ACTUATORS)
+        if cap is not None:
+            self.cap = torch.full((env.num_envs, n_act), float(cap), device=env.device)
+            return
+        self.cap = None
+        for act in robot.actuators:
+            bam = getattr(act, "_bam_model", None)
+            if bam is None:
+                continue
+            kt, r = float(bam.kt.value), float(bam.R.value)
+            vin = getattr(act, "vin_tensor", None)
+            volt = (vin.reshape(-1, 1) * kt / r) if vin is not None else torch.full((env.num_envs, 1), kt * float(bam.actuator.vin) / r, device=env.device)
+            i_max = getattr(bam.actuator, "max_current", None)
+            cap_t = torch.minimum(volt, torch.full_like(volt, kt * float(i_max))) if i_max else volt
+            self.cap = cap_t.repeat(1, n_act).to(env.device)
+            break
+        assert self.cap is not None, "actuator_torque_headroom_cost needs the BAM actuator (or cap_nm)"
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        reserve: float = 0.7,
+        cap_nm: float | None = None,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del cap_nm  # consumed at init
+        asset: Entity = env.scene[asset_cfg.name]
+        tau = asset.data.actuator_force[:, list(LEG_ACTUATORS)].abs()
+        over = ((tau / self.cap - reserve) / max(1.0 - reserve, 1e-6)).clamp(0.0, 1.0)
+        return over.square().mean(dim=1)
+
+
 def upright_body_cmd_relative(
     env: ManagerBasedRlEnv,
     std: float,
