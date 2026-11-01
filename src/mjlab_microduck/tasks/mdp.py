@@ -5848,6 +5848,65 @@ class feet_low_swing_cost:
         self.prev_contact[ids] = True
 
 
+class feet_swing_apex_reward:
+    """Per-swing clearance REWARD, paid once at each landing: sum over feet of
+    clamp(apex / target, 0, 1), apex = highest foot-above-terrain height (height-scan sensor)
+    during the swing that just ended. ≥ 0 and ≤ 2 per landing → POSITIVE weight.
+
+    Why (stairs runs 1-3, 2026-10-29/30): Metrics/peak_height_mean sat at 0.018-0.019 m in
+    every run while the policy was being asked to clear 2.4-3 cm risers. The stock
+    foot_swing_height (symmetric, weight −0.25, 0.007/episode weighted) and foot_clearance
+    give it no reason to lift higher, and feet_low_swing_cost only charges swings under
+    1 cm. This pays for height up to ``target`` and nothing beyond it, so a blind walker is
+    rewarded for the one thing that clears a riser it cannot see: lifting every swing high.
+
+    Guards: a landing counts only after ``min_air_time`` in the air (no reward for
+    chattering contacts); zero while standing (|command| ≤ threshold) and while fallen
+    (tilt > gate). Bounded per landing and landings are bounded by the air-time window, so
+    it cannot be farmed by hopping."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        n_feet = 2
+        self.peak = torch.zeros(env.num_envs, n_feet, device=env.device)
+        self.air = torch.zeros(env.num_envs, n_feet, device=env.device)
+        self.prev_contact = torch.ones(env.num_envs, n_feet, dtype=torch.bool, device=env.device)
+        self.dt = float(env.step_dt)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        height_sensor_name: str,
+        command_name: str,
+        target: float = 0.035,
+        min_air_time: float = 0.06,
+        command_threshold: float = 0.01,
+        gate_tilt_above_deg: float = 40.0,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        contact = env.scene[sensor_name].data.found > 0
+        height = torch.nan_to_num(env.scene[height_sensor_name].data.heights, nan=0.0)
+        in_air = ~contact
+        self.peak = torch.where(in_air, torch.maximum(self.peak, height), self.peak)
+        self.air = torch.where(in_air, self.air + self.dt, self.air)
+        landing = contact & ~self.prev_contact & (self.air >= min_air_time)
+        pay = ((self.peak / target).clamp(0.0, 1.0) * landing.float()).sum(dim=1)
+        self.peak = torch.where(contact, torch.zeros_like(self.peak), self.peak)
+        self.air = torch.where(contact, torch.zeros_like(self.air), self.air)
+        self.prev_contact = contact
+        cmd = env.command_manager.get_command(command_name)
+        walking = (torch.norm(cmd[:, :2], dim=1) + cmd[:, 2].abs()) > command_threshold
+        asset: Entity = env.scene[asset_cfg.name]
+        upright = 1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
+        return pay * walking.float() * upright
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.peak[ids] = 0.0
+        self.air[ids] = 0.0
+        self.prev_contact[ids] = True
+
+
 def upright_body_cmd_relative(
     env: ManagerBasedRlEnv,
     std: float,

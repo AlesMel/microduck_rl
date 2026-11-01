@@ -25,8 +25,10 @@ TASKS = (
     "Mjlab-WalkV2-Stairs-Finetune-Backlash-MicroDuck",
     "Mjlab-WalkV2-StairsV2-Finetune-MicroDuck",
     "Mjlab-WalkV2-StairsV2-Finetune-Backlash-MicroDuck",
+    "Mjlab-WalkV2-StairsApex-Finetune-MicroDuck",
+    "Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck",
 )
-EXPERIMENT = {"Terrain": "walk_v2_terrain", "Stairs": "walk_v2_stairs", "StairsV2": "walk_v2_stairs"}
+EXPERIMENT = {"Terrain": "walk_v2_terrain", "Stairs": "walk_v2_stairs", "StairsV2": "walk_v2_stairs", "StairsApex": "walk_v2_stairs"}
 
 
 def _terrain_spec():
@@ -341,3 +343,68 @@ def test_height_lookup_on_the_stairs():
                 if row == 1:
                     assert 0.3 < allowed[p].mean() < 0.95     # edges of 2.4-3 cm steps excluded
     assert 0.3 < allowed.mean() <= 1.0
+
+
+# ── per-swing apex reward ─────────────────────────────────────────────────────
+
+class _Sensor:
+    def __init__(self, found, heights):
+        self.data = SimpleNamespace(found=found, heights=heights)
+
+
+def _apex_env(n=2):
+    """Fake env for feet_swing_apex_reward: upright robots, walking command, sensors set per step."""
+    found = torch.ones(n, 2); heights = torch.zeros(n, 2)
+    contact, height = _Sensor(found, heights), _Sensor(found, heights)
+    robot = SimpleNamespace(data=SimpleNamespace(root_link_pos_w=torch.tensor([[0.0, 0.0, 0.12]] * n),
+                                                 root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * n)))
+    scene = type("Scene", (), {"terrain": SimpleNamespace(env_origins=torch.zeros(n, 3)),
+                               "__getitem__": lambda self, k: {"contact": contact, "height": height}.get(k, robot)})()
+    env = SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02, scene=scene,
+                          command_manager=SimpleNamespace(get_command=lambda name: torch.tensor([[0.3, 0.0, 0.0]] * n)))
+    return env, contact, height
+
+
+def test_swing_apex_pays_once_per_landing_up_to_target():
+    env, contact, height = _apex_env()
+    term = microduck_mdp.feet_swing_apex_reward(SimpleNamespace(), env)
+    kw = {"sensor_name": "contact", "height_sensor_name": "height", "command_name": "twist", "target": 0.035, "min_air_time": 0.06}
+    # robot 0 swings its left foot to 2 cm, robot 1 to 7 cm; 5 steps in the air (0.1 s), then land
+    out = []
+    for k in range(7):
+        in_air = 1 <= k <= 5
+        contact.data.found[:, 0] = 0.0 if in_air else 1.0
+        height.data.heights[:, 0] = torch.tensor([0.02, 0.07]) if in_air else 0.0
+        out.append(term(env, **kw))
+    out = torch.stack(out)                                   # (7, n)
+    assert torch.all(out[:6] == 0.0)                         # nothing before the landing
+    assert out[6].tolist() == pytest.approx([0.02 / 0.035, 1.0])   # linear to target, capped
+    # a 1-step contact flicker (0.02 s < min_air_time) pays nothing
+    contact.data.found[:, 0] = 0.0; height.data.heights[:, 0] = 0.05
+    term(env, **kw)
+    contact.data.found[:, 0] = 1.0
+    assert torch.all(term(env, **kw) == 0.0)
+
+
+def test_swing_apex_is_zero_when_standing_or_fallen():
+    env, contact, height = _apex_env()
+    term = microduck_mdp.feet_swing_apex_reward(SimpleNamespace(), env)
+    kw = {"sensor_name": "contact", "height_sensor_name": "height", "command_name": "twist", "target": 0.035, "min_air_time": 0.06}
+    env.command_manager = SimpleNamespace(get_command=lambda name: torch.zeros(2, 3))   # standing
+    for k in range(7):
+        in_air = 1 <= k <= 5
+        contact.data.found[:, 0] = 0.0 if in_air else 1.0
+        height.data.heights[:, 0] = 0.05 if in_air else 0.0
+        out = term(env, **kw)
+    assert torch.all(out == 0.0)
+
+
+def test_apex_cfg_and_tasks():
+    cfg = w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, apex=True)
+    t = cfg.rewards["swing_apex"]
+    assert t.func is microduck_mdp.feet_swing_apex_reward and t.weight == w2t.APEX_WEIGHT > 0
+    assert t.params["target"] == w2t.APEX_TARGET == cfg.rewards["foot_swing_height"].params["target_height"]
+    assert t.params["sensor_name"] == cfg.rewards["low_swing"].params["sensor_name"]
+    assert "low_swing" in cfg.rewards and cfg.curriculum["terrain_levels"].func is microduck_mdp.terrain_levels_survival
+    assert "swing_apex" not in w2t.make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True).rewards
+    assert load_rl_cfg("Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck").run_name == "walk_v2_stairs_apex"

@@ -77,6 +77,25 @@ ladder does. foot_swing_height's weighted contribution is 0.007 per episode agai
 competes with the gait stack, trained as a separate rough-ground walk), not the curriculum and
 not perception — see the actuator-torque feasibility check first.
 
+FEASIBILITY (2026-11-01, scripts/eval/stairs_feasibility.py, run 3 model_2999, 64 robots, torque
+measured against BAM's XL330 firmware current limit 1.75 A × kt = 0.64 N·m, which binds at every
+battery voltage in the DR range):
+  - the swing apex SCALES WITH SPEED on flat: p10/median 0.6/1.3 cm at 0.1 m/s, 1.8/2.0 at 0.2,
+    2.2/2.6 at 0.3, 2.9/3.3 at 0.4, 3.5/4.0 at 0.5 (the logged peak_height_mean of 1.9 cm is the
+    all-command average, not the walking apex);
+  - on the stairs at 0.4-0.5 m/s the apex is 3.3-3.9 cm median, above every riser, and rows 2-3
+    STILL fall (10/11, 6/6): the last swing before a fall cleared 3.3-3.9 cm. Clearance is not
+    the limiter above 0.3 m/s;
+  - the knee and hip are at the current cap: flat p99 0.86 (knee) at 0.3 m/s and 1.00 at 0.5;
+    on the steps of rows 2-3 p99 = 1.00 with 8-15 % of steps saturated; in the 0.3 s before a
+    fall the knee sits at the cap 20-30 % of the time. Falls are on the UP flight (toe-catch
+    at the first riser at 0.3 m/s aside). The ceiling is torque during the step-up.
+  - at 0.1-0.2 m/s the gait leaves 27-41 % knee reserve (p99 0.59-0.73) — enough for the
+    0.24-0.39 N·m a quasi-static one-knee lift of the 0.8 kg body needs — but swings only
+    1.3-2.0 cm. A stairs MODE therefore needs all three: slow (≤ 0.3 m/s), a high apex
+    (feet_swing_apex_reward, the ``apex`` option) and torque-reserve pressure, as a separate
+    hot-swapped policy; the fast flat walk cannot be both.
+
 Preview the terrain with the robot standing on it, and check that every spawn is a stable
 stance, with::
 
@@ -86,7 +105,7 @@ from copy import deepcopy
 
 import math
 
-from mjlab.managers import CurriculumTermCfg, EventTermCfg
+from mjlab.managers import CurriculumTermCfg, EventTermCfg, RewardTermCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -125,6 +144,11 @@ V2_MAX_INIT_TERRAIN_LEVEL = 5   # run 3: start rows spread over 0-5 (steps up to
 V2_SPAWN = {"span": PATCH_SIZE / 2 - 0.3, "res": 0.04, "flat_tol": 0.02,
             "yaw_range": (-math.pi, math.pi), "z_clearance": (0.125, 0.135), "candidates": 8}
 
+# apex: pay for swing height (runs 1-3 never lifted above 1.9 cm, see the module docstring).
+APEX_TARGET = 0.035             # m, = FOOT_TARGET_HEIGHT: clears a 3 cm riser with margin
+APEX_WEIGHT = 5.0               # ≈ 6 landings/s × ≤ 1 each → up to ≈ 0.6/step, the air_time term's mass
+APEX_MIN_AIR_TIME = 0.06        # s, a landing counts only after this long in the air
+
 ENABLE_TIGHT_SPAWN = True
 SPAWN_XY = 0.2                  # m, ± offset from the tile's spawn origin
 
@@ -134,7 +158,7 @@ HIP_ROLL_STD = 0.12             # rad, walking/running tiers (recipe: 0.05); sta
 
 
 def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaaclab",
-                                           finetune: bool = False, v2: bool = False):
+                                           finetune: bool = False, v2: bool = False, apex: bool = False):
     if menu not in TERRAIN_MENUS:
         raise ValueError(f"menu must be one of {sorted(TERRAIN_MENUS)}, got {menu!r}")
     cfg = make_microduck_walk_v2_env_cfg(play=play, rough=True)
@@ -171,6 +195,17 @@ def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaa
         )
         cfg.terminations["out_of_terrain_bounds"].params["margin"] = V2_BOUNDS_MARGIN
 
+    if apex:
+        low = cfg.rewards["low_swing"].params
+        cfg.rewards["swing_apex"] = RewardTermCfg(
+            func=microduck_mdp.feet_swing_apex_reward,
+            weight=APEX_WEIGHT,
+            params={"sensor_name": low["sensor_name"], "height_sensor_name": low["height_sensor_name"],
+                    "command_name": low["command_name"], "target": APEX_TARGET,
+                    "min_air_time": APEX_MIN_AIR_TIME, "command_threshold": low["command_threshold"],
+                    "gate_tilt_above_deg": low["gate_tilt_above_deg"]},
+        )
+
     if ENABLE_TIGHT_SPAWN and "pose_range" in cfg.events["reset_base"].params:
         pose_range = cfg.events["reset_base"].params["pose_range"]
         pose_range["x"] = (-SPAWN_XY, SPAWN_XY)
@@ -200,3 +235,6 @@ MicroduckWalkV2StairsFinetuneRlCfg.max_iterations = FINETUNE_MAX_ITERATIONS
 
 MicroduckWalkV2StairsV2RlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
 MicroduckWalkV2StairsV2RlCfg.run_name = "walk_v2_stairs_v2"
+
+MicroduckWalkV2StairsApexRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
+MicroduckWalkV2StairsApexRlCfg.run_name = "walk_v2_stairs_apex"
