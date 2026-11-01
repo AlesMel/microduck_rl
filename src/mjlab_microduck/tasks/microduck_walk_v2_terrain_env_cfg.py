@@ -65,7 +65,17 @@ model_2999, 2048 envs, 3000 it, wandb 4y1g919r): reward 105-120, gait unchanged,
 0.45-0.6 of resets, mean level 0 → 2.1 by it 1250 then an EQUILIBRIUM at ≈ 2 (robots reach
 row 3+, fall, come back). model_2999 on the stairs: 0.5-2.4 cm steps crossed (1.7-2.4 cm: up,
 over the landing and down with one fall — new), 2.4-3.0 cm: onto the first flight then falls.
-RUN 3 = run 2 + V2_MAX_INIT_TERRAIN_LEVEL 0 → 5, from run 2's model_2999.
+RUN 3 (2026-10-30, wandb s8noq7vp) = run 2 + V2_MAX_INIT_TERRAIN_LEVEL 0 → 5, from run 2's
+model_2999. Ladder started at 2.5, the robots dealt to rows 3-5 fell and were demoted to 1.9 by
+it 100, equilibrium back at 2.2-2.3 by the end: spreading the start rows did NOT raise the
+ceiling. model_2999 on the stairs (32 robots): 0.5-1.7 cm crossed without falls, 1.7-2.4 cm
+5/5 fell on the first flight, 2.4-3.0 cm 2/2 fell.
+WHY, in one number: Metrics/peak_height_mean read 0.018-0.019 m in ALL THREE runs — the swing
+apex never moved, and a blind walker lifting 1.9 cm trips on a 2.4 cm riser whatever the
+ladder does. foot_swing_height's weighted contribution is 0.007 per episode against a stack of
+≈ 110: the 3.5 cm target is on paper only. Next lever is the gait (a per-swing apex term that
+competes with the gait stack, trained as a separate rough-ground walk), not the curriculum and
+not perception — see the actuator-torque feasibility check first.
 
 Preview the terrain with the robot standing on it, and check that every spawn is a stable
 stance, with::
