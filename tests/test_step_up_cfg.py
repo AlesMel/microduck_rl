@@ -66,6 +66,18 @@ def test_commands_point_into_the_step_and_head_down():
     assert cfg.scene.terrain.terrain_generator.sub_terrains.keys() == {"flat", "single_step", "short_flight"}
 
 
+def test_free_head_variant_loosens_only_the_head():
+    base = load_env_cfg("Mjlab-StepUp-Tof-Backlash-MicroDuck", play=False)
+    free = load_env_cfg("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck", play=False)
+    assert free.rewards["head_pose_tracking"].weight == su.FREE_HEAD_TRACK_WEIGHT < base.rewards["head_pose_tracking"].weight
+    assert free.rewards["head_pose_tracking"].params["std"] == su.FREE_HEAD_TRACK_STD > su.HEAD_TRACK_STD
+    assert free.commands["head_pose"].ranges == base.commands["head_pose"].ranges        # the prior stays
+    for k in ("height_progress", "foot_on_step", "swing_apex", "torque_headroom"):
+        assert free.rewards[k].weight == base.rewards[k].weight
+    assert load_rl_cfg("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck").run_name == "step_up_tof_freehead"
+    assert load_rl_cfg("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck").experiment_name == "step_up"
+
+
 def test_backlash_twin_uses_backlash_model():
     cfg = load_env_cfg("Mjlab-StepUp-Tof-Backlash-MicroDuck", play=False)
     assert "backlash" in str(cfg.scene.entities["robot"].spec_fn).lower() or cfg.scene.entities["robot"] is not \

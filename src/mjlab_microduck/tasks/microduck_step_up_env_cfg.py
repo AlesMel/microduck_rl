@@ -81,6 +81,10 @@ WZ_RANGE = (-0.2, 0.2)
 HEAD_DOWN = (-0.22, 0.22)        # (neck_pitch, head_pitch) deltas, rad: sensor ≈ 25° below level
 HEAD_JITTER = 0.05               # rad, so the slot is a range (alive), not a constant
 HEAD_TRACK_STD = 0.25            # velocity recipe: 0.5 (too loose to hold a 0.22 rad offset)
+# free head (run 7b): the "look down" command stays as a weak prior and the policy may aim the
+# sensor itself — run 6 held the head still and only ever saw the floor band 0.2-0.5 m ahead.
+FREE_HEAD_TRACK_WEIGHT = 0.5     # recipe: 2.0
+FREE_HEAD_TRACK_STD = 0.5        # recipe: 0.5
 SPAWN_YAW = 0.35                 # rad, ±20° around +x (into the step)
 SPAWN_LOW_FRAC = 0.8             # resets on the approach (below the step); the rest anywhere = reverse curriculum
 PROGRESS_WEIGHT = 100.0          # × Δz [m]: a 3 cm step-up pays 3.0 once; a fall pays ≈ −7
@@ -92,7 +96,7 @@ IMPACT_WEIGHT = 0.02             # trunk_vertical_accel_penalty is SELF-NEGATING
 TOF_PARAMS = {"sensor_name": tof.TOF_SENSOR_NAME}
 
 
-def make_microduck_step_up_env_cfg(play: bool = False):
+def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False):
     cfg = make_microduck_walk_v2_terrain_env_cfg(
         play=play, menu="step_up", finetune=True, v2=True, apex=True, stairs_mode=True,
     )
@@ -121,6 +125,9 @@ def make_microduck_step_up_env_cfg(play: bool = False):
         (-0.015, 0.015),
     )
     cfg.rewards["head_pose_tracking"].params["std"] = HEAD_TRACK_STD
+    if free_head:
+        cfg.rewards["head_pose_tracking"].weight = FREE_HEAD_TRACK_WEIGHT
+        cfg.rewards["head_pose_tracking"].params["std"] = FREE_HEAD_TRACK_STD
     cfg.curriculum.pop("head_pose_range", None)       # the inherited widening would undo the offset
 
     # Spawn facing the step (reset_root_on_terrain is already wired by v2).
@@ -150,3 +157,6 @@ def make_microduck_step_up_env_cfg(play: bool = False):
 MicroduckStepUpRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
 MicroduckStepUpRlCfg.experiment_name = "step_up"
 MicroduckStepUpRlCfg.run_name = "step_up_tof"
+
+MicroduckStepUpFreeHeadRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpFreeHeadRlCfg.run_name = "step_up_tof_freehead"

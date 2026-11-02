@@ -55,6 +55,7 @@ from .microduck_ground_pick_env_cfg import (
     MicroduckGroundPickRlCfg,
 )
 from .microduck_step_up_env_cfg import (
+    MicroduckStepUpFreeHeadRlCfg,
     MicroduckStepUpRlCfg,
     make_microduck_step_up_env_cfg,
 )
@@ -220,6 +221,15 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# StepUp-Tof-FreeHead — the same skill with the head free to aim the sensor (run 7b).
+register_mjlab_task(
+    task_id="Mjlab-StepUp-Tof-FreeHead-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(free_head=True),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True, free_head=True),
+    rl_cfg=MicroduckStepUpFreeHeadRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Stand-up task — robot starts inverted (lying on back) and must stand up
 register_mjlab_task(
     task_id="Mjlab-StandUp-Flat-MicroDuck",
@@ -377,6 +387,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True}, MicroduckWalkV2StairsModeRlCfg, _BL_WALK),
     ("Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True, "headroom_weight": MODE_HEADROOM_WEIGHT_HR}, MicroduckWalkV2StairsModeHRRlCfg, _BL_WALK),
     ("Mjlab-StepUp-Tof-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {}, MicroduckStepUpRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True}, MicroduckStepUpFreeHeadRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),
