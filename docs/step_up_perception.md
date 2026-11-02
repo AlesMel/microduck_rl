@@ -103,3 +103,12 @@ is then exactly the blind stairs policy; the ToF columns grow from zero as they 
 
 - Runtime: `obs_len 125` policy kind + ToF append in the control loop (`microduck` repo).
 - `publish`: `OBS_LEN` gate per policy kind (manifest schema change on both sides).
+
+## 8. Result of the first run (2026-11-02)
+
+Run 6 (wandb 5fiepb9r, warm-started from the blind stairs policy) uses the sensor: on the
+play grid, sighted 50/86 robots end on top of their step (3.7 cm single step 7/13, 11 cm
+three-riser flight 4/12) with 11 falls; the same network with the ToF frame blanked ends on
+top 15/86 with 61 falls, i.e. back at the blind walk's ≈ 2 cm ceiling. No wandb aggregate
+showed it — the survival ladder plateaued at 5.9 — the sighted/blind eval did
+(`scripts/eval/step_up_eval.py --blind`). Details in the env cfg docstring.

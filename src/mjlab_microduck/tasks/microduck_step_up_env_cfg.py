@@ -31,6 +31,34 @@ small step-up stack:
 
 Verify before training (design doc §6): ``tests/test_tof.py`` (the grid sees the floor),
 ``tests/test_step_up_cfg.py``, then a 64-env smoke run.
+
+RUN 6 (2026-11-02, Mjlab-StepUp-Tof-Backlash-MicroDuck from run 4's model_2999 via Patch 6,
+2048 envs, 3000 it, wandb 5fiepb9r; a first launch yuhkuuw7 was stopped at it 138 — spawns
+anywhere let half the robots start on top, farm foot_on_step and climb the ladder without a
+step, hence low_frac and the bonus latch). Aggregates were FLAT: ladder 5.9 from it 250 on,
+foot_on_step 0.021/step and height_progress ≈ 0 throughout, ep_len 364 — nothing in wandb
+said the sensor was being learned. The eval said otherwise (scripts/eval/step_up_eval.py,
+96 robots, 8 s, vx 0.25, play grid of 4 rows):
+                            SIGHTED                 BLIND (ToF := 1.0)
+  single_step 1.8 cm        on top 6/10, fell 0     5/10, fell 2
+  single_step 2.4 cm        on top 7/10, fell 0     2/10, fell 6
+  single_step 3.1 cm        on top 6/15, fell 1     2/15, fell 8
+  single_step 3.7 cm        on top 7/13, fell 4     0/13, fell 13
+  short_flight 5.4 cm       on top 6/6,  fell 0     4/6,  fell 2
+  short_flight 7.3 cm       on top 12/14, fell 1    2/14, fell 12
+  short_flight 9.2 cm       on top 2/6,  fell 2     0/6,  fell 6
+  short_flight 11.1 cm      on top 4/12, fell 3     0/12, fell 12
+  TOTAL                     50/86 on top, 11 fell   15/86 on top, 61 fell
+The same network with the grid blanked collapses to the blind walk's ceiling (≈ 2 cm); with
+the grid it climbs a 3.7 cm single step in half the attempts and an 11 cm three-riser flight
+in a third, falling rarely — the sighted robots that do not make it mostly STOP before the
+step (x max 1.26 m at 3.7 cm) rather than fall. The ToF columns were learned even though no
+training curve moved: the ladder plateau hid a sighted/blind gap of 35 robots. Caveat: a
+1.0 frame is out of distribution (training frames always show floor), so part of the blind
+collapse may be OOD rather than lost information; a flat-floor frame ablation would be
+the fairer control. Video: scripts/view_terrain_env.py on the step-up grid (run6_step_up_tof).
+Next levers: longer training (the curve never saturated by any visible metric), the
+flat-floor ablation, and the runtime side (obs_len 125 policy kind + ToF append).
 """
 from copy import deepcopy
 
