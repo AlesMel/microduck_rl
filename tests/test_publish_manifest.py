@@ -325,3 +325,51 @@ def test_the_cli_refuses_a_missing_video(tmp_path):
             repo="someone/microduck-bow", kind="episodic", onnx=str(policy),
             duration_s=4.0, video=str(tmp_path / "nope.mp4"), dry_run=True,
         ))
+
+
+# ── perception: the ToF-fed policies ─────────────────────────────────────────
+
+def test_perception_widths_are_the_daemons():
+    assert m.PERCEPTIONS == {"none": 61, "tof8x8": 125} and m.MODEL_API_PERCEPTIVE == 3
+    assert m.perception_of_width(61) == "none" and m.perception_of_width(125) == "tof8x8"
+    with pytest.raises(m.ManifestError):
+        m.perception_of_width(51)
+
+
+def test_a_perceptive_manifest_declares_the_frame_and_the_api():
+    man = m.build_manifest(name="stepup", kind="perpetual", description="d", slot="walk", perception="tof8x8")
+    assert man["perception"] == "tof8x8" and man["obs_len"] == 125 and man["model_api"] == 3
+    m.validate_manifest(man)
+    blind = m.build_manifest(name="walk", kind="perpetual", description="d", slot="walk")
+    assert "perception" not in blind and blind["obs_len"] == 61 and blind["model_api"] == 1
+    with pytest.raises(m.ManifestError):
+        m.build_manifest(name="x", kind="perpetual", description="d", perception="lidar")
+
+
+@pytest.mark.parametrize("bad, why", [
+    ({"obs_len": 125}, "125 without perception"),
+    ({"obs_len": 61, "perception": "tof8x8"}, "tof8x8 with a blind width"),
+    ({"obs_len": 125, "perception": "tof8x8", "model_api": 1}, "a perceptive policy on the blind api"),
+    ({"perception": "depth_camera"}, "a frame the robot cannot build"),
+])
+def test_a_perception_claim_that_disagrees_is_refused(bad, why):
+    with pytest.raises(m.ManifestError):
+        m.validate_manifest({"obs_len": 61, "action_len": 14, **bad})
+
+
+def test_a_125_to_14_graph_passes_and_smoke_runs(tmp_path):
+    path = _tiny_policy(tmp_path / "p.onnx", obs_len=125)
+    shape = m.check_onnx(path)
+    assert (shape.obs_len, shape.action_len) == (125, 14)
+    m.smoke_run_onnx(path)
+
+
+def test_the_task_registry_says_which_tasks_are_perceptive():
+    assert m.perception_of_task("Mjlab-StepUp-Tof-Backlash-MicroDuck") == "tof8x8"
+    assert m.perception_of_task("Mjlab-WalkV2-Stairs-MicroDuck") == "none"
+
+
+def test_the_readme_says_a_perceptive_policy_reads_the_tof():
+    man = m.build_manifest(name="stepup", kind="perpetual", description="d", slot="walk", perception="tof8x8")
+    card = m.render_readme(man, "someone/microduck-stepup")
+    assert "125-D observation" in card and "tof8x8" in card and "tofd" in card
