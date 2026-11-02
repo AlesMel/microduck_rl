@@ -118,6 +118,7 @@ class tof_depth:
         self.noise_abs = float(p.get("noise_abs", 0.004))
         self.dropout = float(p.get("dropout_prob", 0.05))
         self.scale_range = float(p.get("scale_range", 0.02))
+        self.blank = bool(p.get("blank", False))   # ablation: the policy sees "nothing in range" forever
         n, dev = env.num_envs, env.device
         self.step_dt = float(env.step_dt)
         depth = self.latency + 1
@@ -140,6 +141,8 @@ class tof_depth:
 
     def __call__(self, env, **_) -> torch.Tensor:
         d = self._raw_m(env)
+        if self.blank:
+            return torch.ones_like(d)
         if self.clean:
             return encode_ranges(d, self.clip_m)
         # Advance the sensor clock; envs crossing a period boundary measure a new frame.
