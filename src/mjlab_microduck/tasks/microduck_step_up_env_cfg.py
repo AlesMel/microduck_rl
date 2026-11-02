@@ -33,6 +33,7 @@ Verify before training (design doc §6): ``tests/test_tof.py`` (the grid sees th
 from copy import deepcopy
 
 from mjlab.managers import ObservationTermCfg, RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -55,7 +56,8 @@ PROGRESS_WEIGHT = 100.0          # × Δz [m]: a 3 cm step-up pays 3.0 once; a f
 PROGRESS_CLIP = 0.01             # m per step
 FOOT_ON_STEP_WEIGHT = 5.0        # × 2 feet, once per episode
 FOOT_ON_STEP_MIN_RISE = 0.012    # m, 80 % of the smallest riser
-IMPACT_WEIGHT = -0.02            # trunk_vertical_accel_penalty is ≥ 0 → negative weight
+IMPACT_WEIGHT = 0.02             # trunk_vertical_accel_penalty is SELF-NEGATING (returns −|a_z|) → POSITIVE weight
+                                 # (the smoke test caught −0.02 paying +0.025/step for impacts)
 TOF_PARAMS = {"sensor_name": tof.TOF_SENSOR_NAME}
 
 
@@ -103,7 +105,9 @@ def make_microduck_step_up_env_cfg(play: bool = False):
     )
     cfg.rewards["foot_on_step"] = RewardTermCfg(
         func=microduck_mdp.foot_on_step_bonus, weight=FOOT_ON_STEP_WEIGHT,
-        params={"sensor_name": contact_sensor, "min_rise": FOOT_ON_STEP_MIN_RISE},
+        params={"sensor_name": contact_sensor, "min_rise": FOOT_ON_STEP_MIN_RISE,
+                # in params so the manager resolves the two foot site ids (a default arg stays unresolved)
+                "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))},
     )
     cfg.rewards["trunk_impact"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty, weight=IMPACT_WEIGHT, params={},

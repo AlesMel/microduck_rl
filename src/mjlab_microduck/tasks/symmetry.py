@@ -110,6 +110,26 @@ def _get_tensors(
     return _cache[device]
 
 
+OBS_DIM = len(_OBS_PERM)          # 61: the family contract
+TOF_BLOCK = 64                    # an appended 8×8 ToF frame (tasks/tof.py), wire order
+
+
+def mirror_actor_obs(actor: torch.Tensor, obs_perm: torch.Tensor, obs_sign: torch.Tensor) -> torch.Tensor:
+    """Mirror a [B, 61] actor obs with the table; any tail of whole 8×8 ToF blocks is mirrored
+    by flipping the COLUMNS of every row (column 0 is the sensor's left, so left ↔ right).
+    The sensor sits 2.2 cm left of the head midline, so this is an approximation at the
+    centimetre level — fine for augmentation, which is where the mirror is used."""
+    head = actor[:, :OBS_DIM][:, obs_perm] * obs_sign
+    tail = actor[:, OBS_DIM:]
+    if tail.shape[1] == 0:
+        return head
+    if tail.shape[1] % TOF_BLOCK != 0:
+        raise ValueError(f"actor obs {actor.shape[1]}-D: the tail past {OBS_DIM} is not whole ToF blocks")
+    k = tail.shape[1] // TOF_BLOCK
+    tail_sym = tail.reshape(-1, k, 8, 8).flip(-1).reshape(tail.shape[0], -1)
+    return torch.cat([head, tail_sym], dim=1)
+
+
 # ---------------------------------------------------------------------------
 # Public augmentation function
 # ---------------------------------------------------------------------------
@@ -141,9 +161,9 @@ def microduck_vel_symmetry(
     aug_actions: torch.Tensor | None = None
 
     if obs is not None:
-        actor_orig: torch.Tensor = obs["actor"]  # [B, 51]
+        actor_orig: torch.Tensor = obs["actor"]  # [B, 61] or [B, 61 + k·64] (perceptive envs)
         obs_perm, obs_sign, _, _ = _get_tensors(actor_orig.device)
-        actor_sym = actor_orig[:, obs_perm] * obs_sign
+        actor_sym = mirror_actor_obs(actor_orig, obs_perm, obs_sign)
 
         critic_orig: torch.Tensor = obs["critic"]
         # Critic obs mirroring is not implemented (not needed for use_mirror_loss).

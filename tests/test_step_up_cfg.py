@@ -44,7 +44,8 @@ def test_registered_with_tof_and_rewards(task):
     r = cfg.rewards
     assert r["height_progress"].func is microduck_mdp.trunk_height_progress and r["height_progress"].weight > 0
     assert r["foot_on_step"].func is microduck_mdp.foot_on_step_bonus and r["foot_on_step"].weight > 0
-    assert r["trunk_impact"].func is microduck_mdp.trunk_vertical_accel_penalty and r["trunk_impact"].weight < 0
+    assert tuple(r["foot_on_step"].params["asset_cfg"].site_names) == ("left_foot", "right_foot")
+    assert r["trunk_impact"].func is microduck_mdp.trunk_vertical_accel_penalty and r["trunk_impact"].weight > 0   # self-negating
     assert "swing_apex" in r and "torque_headroom" in r and r["torque_headroom"].weight < 0
     assert cfg.episode_length_s == su.EPISODE_LENGTH_S
     assert load_rl_cfg(task).run_name == "step_up_tof" and load_rl_cfg(task).experiment_name == "step_up"

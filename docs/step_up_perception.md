@@ -14,12 +14,17 @@ and "could not measure" marks. Wire order is row-major, **row 0 = top, column 0 
 left**; zone centres are spread over the FoV with a half-zone inset (`kinematics/src/tof.rs`,
 `Reprojector::new`). Sensor frame: +x forward, +y left, +z up.
 
-In the MJCF the sensor is the site `tof` on body `jaw_soft` (pos 0.0135 0.0224 −0.0733,
-quat 0.707 0 0.707 0): the site's **z axis points forward**, x down, y left. mjlab's
-`PinholeCameraPatternCfg` assumes −z forward and fencepost spacing, so the sim uses its own
-`TofPatternCfg` that reproduces `tof.rs` exactly in the site frame.
+In the MJCF the sensor is the site `tof` on body `jaw_soft`. Checked in the world (head at
+HOME): the site's **x axis points forward, y left, z up** — the sensor frame itself; the XML
+quat looks like a z-forward rotation but the parent body's frame undoes it, so trust the
+world-frame check, not the XML. mjlab's `PinholeCameraPatternCfg` assumes −z forward and
+fencepost spacing, so the sim uses its own `TofPatternCfg` that reproduces `tof.rs` exactly.
+Measured with the head at HOME on a flat tile: bottom row ranges the floor at 0.76 m (sensor
+0.24 m up, beam 19.7° below the axis), rows 0–4 are above the horizon; on the stairs tile the
+risers read as shorter ranges in rows 5–6.
 
-The head is actuated (neck_pitch −90…+60°, head_pitch ±90°), so the policy can aim the sensor:
+The head is actuated (neck_pitch −90…+60°, head_pitch ±90°; a NEGATIVE neck_pitch delta or a
+POSITIVE head_pitch delta pitches the sensor down, 0.4 rad ≈ 23°), so the policy can aim it:
 at 0.2 m sensor height and 0° pitch the bottom row reaches the floor ≈ 0.48 m ahead; pitched
 down 25–30° the grid covers the floor from ≈ 0.15 m to ≈ 1.2 m ahead — the whole approach to
 a step.

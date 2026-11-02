@@ -147,3 +147,21 @@ def test_reset_blanks_the_frame_buffer(tof_env):
     assert isinstance(term, tof.tof_depth)
     term.reset(torch.tensor([0, 1]))
     assert torch.all(term.frames[:2] == 1.0)
+
+
+# ── symmetry augmentation on the 125-D obs ──────────────────────────────────
+
+def test_mirror_flips_tof_columns_and_is_an_involution():
+    from mjlab_microduck.tasks import symmetry
+    obs_perm, obs_sign, _, _ = symmetry._get_tensors(torch.device("cpu"))
+    base = torch.randn(3, 61)
+    frame = torch.rand(3, 64)
+    actor = torch.cat([base, frame], dim=1)
+    sym = symmetry.mirror_actor_obs(actor, obs_perm, obs_sign)
+    assert sym.shape == actor.shape
+    assert torch.equal(sym[:, :61], symmetry.mirror_actor_obs(base, obs_perm, obs_sign))
+    grid, grid_sym = frame.reshape(3, 8, 8), sym[:, 61:].reshape(3, 8, 8)
+    assert torch.equal(grid_sym, grid.flip(-1))                      # row kept, left ↔ right
+    assert torch.allclose(symmetry.mirror_actor_obs(sym, obs_perm, obs_sign), actor)   # mirror twice = identity
+    with pytest.raises(ValueError):
+        symmetry.mirror_actor_obs(torch.randn(2, 61 + 10), obs_perm, obs_sign)

@@ -53,6 +53,12 @@ from _common import command_obs, load_policy
 DEFAULT_TASK = "Mjlab-WalkV2-Terrain-MicroDuck"
 NUM_ACTIONS = 14
 STAIRS = "straight_stairs"
+STEP_TILES = (STAIRS, "single_step", "short_flight")   # tiles with a step profile worth a side camera
+
+
+def _tile_name(names: list[str]) -> str | None:
+    """The step tile of this menu (stairs grids: the straight stairs; step-up grids: the single step)."""
+    return next((t for t in STEP_TILES if t in names), None)
 
 
 def build_env(task: str, num_envs: int, seed: int, device: str = "cpu",
@@ -205,8 +211,9 @@ def _terrain_layout(env: ManagerBasedRlEnv):
 def _focus_robot(env: ManagerBasedRlEnv) -> int:
     """The robot on the straight stairs' hardest occupied row (else robot 0)."""
     names, types, levels, _ = _terrain_layout(env)
-    if STAIRS in names:
-        on = np.nonzero(types == names.index(STAIRS))[0]
+    tile = _tile_name(names)
+    if tile is not None:
+        on = np.nonzero(types == names.index(tile))[0]
         if len(on):
             return int(on[np.argmax(levels[on])])
     return 0
@@ -284,9 +291,10 @@ def outcome_lines(states: dict, env: ManagerBasedRlEnv) -> list[str]:
 def _stairs_robots(states: dict) -> list[int]:
     """Robots on the straight stairs, easiest row first (ties: lowest id)."""
     names, types, levels = states["names"], states["types"], states["levels"]
-    if STAIRS not in names:
+    tile = _tile_name(names)
+    if tile is None:
         return [0]
-    on = np.nonzero(types == names.index(STAIRS))[0]
+    on = np.nonzero(types == names.index(tile))[0]
     return [int(i) for i in sorted(on, key=lambda i: (levels[i], i))] or [0]
 
 
@@ -301,7 +309,7 @@ def render_video(env: ManagerBasedRlEnv, states: dict, path: str, label: str,
     levels = states["levels"]
     env_origins = states["env_origins"]
     gen = env.scene.terrain.cfg.terrain_generator
-    st = gen.sub_terrains.get(STAIRS)
+    st = gen.sub_terrains.get(_tile_name(states["names"]) or "")
     robots = _stairs_robots(states)
     panes = [robots[0], robots[-1]] if len(robots) > 1 else [robots[0]]
     pane_w = width // len(panes)
