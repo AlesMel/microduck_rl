@@ -138,6 +138,60 @@ class BoxStraightStairsTerrainCfg(SubTerrainCfg):
 
 
 @dataclass(kw_only=True)
+class BoxSingleStepTerrainCfg(SubTerrainCfg):
+    """One step UP along +x and nothing after it: flat approach → ``num_steps`` risers (1 for the
+    single step, 2-3 for a short flight) → a top platform to the end of the tile. Full width.
+
+    The step-up skill's terrain (``docs/step_up_perception.md``). The approach length is drawn
+    per tile from ``approach_range`` so the step is not always at the same distance from the
+    spawn — the ToF has to find it. The riser height follows difficulty. No step down: the
+    height-progress reward is potential-based on trunk z, and a tile that only goes up makes
+    "end higher than you started" exactly the skill.
+    """
+
+    step_height_range: tuple[float, float] = (0.015, 0.040)
+    """Riser, metres, interpolated by difficulty."""
+    step_width: float = STAIR_TREAD
+    """Tread depth of the intermediate steps of a flight, metres."""
+    num_steps: int = 1
+    """Risers (1 = a single step)."""
+    approach_range: tuple[float, float] = (0.8, 1.6)
+    """Flat run-up before the first riser, metres, drawn per tile."""
+    thickness: float = 0.5
+
+    def step_height(self, difficulty: float) -> float:
+        return _lerp(self.step_height_range[0], self.step_height_range[1], difficulty)
+
+    def function(
+        self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator
+    ) -> TerrainOutput:
+        assert self.step_width >= 2 * FOOT_LENGTH
+        body = spec.body("terrain")
+        h = self.step_height(difficulty)
+        width = self.size[1]
+        approach = float(rng.uniform(*self.approach_range))
+        segments: list[tuple[float, float, float]] = [(0.0, approach, 0.0)]
+        x = approach
+        for k in range(1, self.num_steps):
+            segments.append((x, x + self.step_width, k * h))
+            x += self.step_width
+        segments.append((x, self.size[0], self.num_steps * h))
+        assert self.size[0] - x >= 1.0, "top platform shorter than 1 m"
+        geometries: list[TerrainGeometry] = []
+        for x0, x1, top in segments:
+            half_h = (top + self.thickness) / 2.0
+            geom = body.add_geom(
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=((x1 - x0) / 2.0, width / 2.0, half_h),
+                pos=((x0 + x1) / 2.0, width / 2.0, top - half_h),
+            )
+            shade = 0.45 + 0.5 * (top / max(self.num_steps * h, 1e-6))
+            geometries.append(TerrainGeometry(geom=geom, color=(0.4, 0.55 * shade, shade, 1.0)))
+        origin = np.array([0.5, width / 2.0, 0.0])          # 0.3-1.1 m before the first riser
+        return TerrainOutput(origin=origin, geometries=geometries)
+
+
+@dataclass(kw_only=True)
 class HfRubbleTerrainCfg(terrain_gen.HfRandomUniformTerrainCfg):
     """Continuous bumps (gravel / grass proxy) whose amplitude scales with difficulty.
 
@@ -267,3 +321,23 @@ def make_microduck_stairs_terrains_cfg(
 ) -> TerrainGeneratorCfg:
     """Stairs-only curriculum grid for the microduck."""
     return _generator(microduck_stairs_subterrains(scale), num_rows, seed, border_width)
+
+
+STEP_UP_HEIGHT_RANGE = (0.015, 0.040)   # m: from "the blind walk does this" to "a real stair for a duck"
+
+
+def microduck_step_up_subterrains(scale: float = 1.0) -> dict[str, SubTerrainCfg]:
+    """Step-up skill menu: a single step, a short flight, one flat column (keeps flat walking alive)."""
+    heights = (STEP_UP_HEIGHT_RANGE[0] * scale, STEP_UP_HEIGHT_RANGE[1] * scale)
+    return {
+        "flat": terrain_gen.BoxFlatTerrainCfg(proportion=0.10),
+        "single_step": BoxSingleStepTerrainCfg(proportion=0.50, step_height_range=heights, num_steps=1),
+        "short_flight": BoxSingleStepTerrainCfg(proportion=0.40, step_height_range=heights, num_steps=3),
+    }
+
+
+def make_microduck_step_up_terrains_cfg(
+    num_rows: int = NUM_ROWS, scale: float = 1.0, seed: int | None = None, border_width: float = BORDER_WIDTH
+) -> TerrainGeneratorCfg:
+    """Step-up curriculum grid for the microduck (rows = riser height 1.5 → 4 cm)."""
+    return _generator(microduck_step_up_subterrains(scale), num_rows, seed, border_width)

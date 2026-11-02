@@ -8466,3 +8466,57 @@ class walk_v2_gait_stats:
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         pass  # windows are global, not per env
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step-up skill (ToF perception) — see docs/step_up_perception.md
+# ═══════════════════════════════════════════════════════════════════════════
+
+class trunk_height_progress:
+    """Potential-based height shaping: pays Δz of the trunk (relative to the env origin) per
+    step, clipped to ±``clip`` per step. Rising pays, holding pays zero, falling back pays the
+    rise back — over an episode the sum is z_end − z_start, so the only way to earn is to END
+    higher (on the step) and the only way to lose is to end lower (fallen). Unfarmable by
+    hopping: every rise is paid back on the way down. Signed → POSITIVE weight.
+    The first step after a reset pays zero (no transient from the previous episode)."""
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.prev = torch.zeros(env.num_envs, device=env.device)
+        self.fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def __call__(self, env: ManagerBasedRlEnv, clip: float = 0.01,
+                 asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2], nan=0.0)
+        dz = torch.where(self.fresh, torch.zeros_like(z), (z - self.prev).clamp(-clip, clip))
+        self.prev = z
+        self.fresh[:] = False
+        return dz
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.fresh[ids] = True
+
+
+class foot_on_step_bonus:
+    """Pays 1 ONCE per foot per episode the first time that foot stands (contact) at least
+    ``min_rise`` above the env origin while the robot is upright — i.e. it has landed on the
+    step. On the flat column nothing is higher than the origin, so it never pays there. Bounded
+    at 2 per episode: no per-step jackpot for camping on the step. ≥ 0 → POSITIVE weight."""
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.paid = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+
+    def __call__(self, env: ManagerBasedRlEnv, sensor_name: str, min_rise: float = 0.012,
+                 gate_tilt_above_deg: float = 40.0,
+                 asset_cfg: SceneEntityCfg = _ROLLER_FEET_SITE_CFG) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        contact = env.scene[sensor_name].data.found[:, :2] > 0                        # (B, 2)
+        foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2] - env.scene.env_origins[:, 2:3]
+        upright = (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)).bool()[:, None]
+        on_step = contact & (foot_z >= min_rise) & upright
+        new = on_step & ~self.paid
+        self.paid |= on_step
+        return new.float().sum(dim=1)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.paid[ids] = False

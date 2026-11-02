@@ -1,0 +1,116 @@
+"""Step-up skill with ToF perception — the first PERCEPTIVE microduck policy.
+
+Why (docs/step_up_perception.md): five blind stairs runs put the blind walk's ceiling at ≈ 2 cm
+risers; on 2.4-3.0 cm the knee sits at the XL330's 0.64 N·m current cap during every step-up
+and pricing torque (runs 4-5) only lowered the swing. Quasi-statically the lift needs 0.24-0.39
+N·m, so a DELIBERATE step is within budget — which needs to see the step. This env is the
+stairs-mode recipe (run 4's slow walk with the apex reward) plus the head ToF as an input and a
+small step-up stack:
+
+  obs      61-D family contract + 64 ToF zones appended (actor: 15 Hz hold, latency, noise,
+           dropouts; critic: the clean frame as well) → 125-D actor. See tasks/tof.py.
+  terrain  ``step_up`` menu: flat / single_step / short_flight (3 risers), riser 1.5 → 4 cm by
+           row, approach 0.8-1.6 m drawn per tile, top platform to the tile end (no step down).
+  head     the head_pose command slot says "look down": neck −0.22 / head +0.22 rad (≈ 25°
+           down, split over both joints) with a little jitter, tracked at std 0.25 — so the
+           metre ahead is in the grid from step 0 and the runtime reproduces it by writing the
+           same command. The policy may still move the head (active perception).
+  commands twist vx ∈ [0.1, 0.3] forward only (the step is ahead), vy / wz small; head and
+           body slots alive as always.
+  rewards  inherited gait stack (apex, torque headroom) +
+             trunk_height_progress   potential-based Δz, rising pays, hopping nets zero
+             foot_on_step            1 per foot, once per episode, contact ≥ 1.2 cm above origin
+             trunk_vertical_accel    |a_z| impact cost
+  spawns   reset_root_on_terrain (any usable cell of the tile, yaw ±20° toward +x): the top
+           platform is ≈ half the tile, so a reverse curriculum (starting on top, or at the
+           edge) comes for free; the ladder is the survival rule.
+  warm     MICRODUCK_WARM_START_EXPAND_OBS=1 loads run 4's 61-D actor into the 125-D one
+           (ToF columns zero): iteration 0 IS the blind stairs policy.
+
+Verify before training (design doc §6): ``tests/test_tof.py`` (the grid sees the floor),
+``tests/test_step_up_cfg.py``, then a 64-env smoke run.
+"""
+from copy import deepcopy
+
+from mjlab.managers import ObservationTermCfg, RewardTermCfg
+from mjlab.rl import RslRlOnPolicyRunnerCfg
+
+from mjlab_microduck.tasks import mdp as microduck_mdp
+from mjlab_microduck.tasks import tof
+from mjlab_microduck.tasks.microduck_walk_v2_terrain_env_cfg import (
+    MicroduckWalkV2StairsFinetuneRlCfg,
+    make_microduck_walk_v2_terrain_env_cfg,
+)
+
+# ── tuned constants ────────────────────────────────────────────────────────
+EPISODE_LENGTH_S = 8.0
+VX_RANGE = (0.1, 0.3)            # m/s, forward only
+VY_RANGE = (-0.05, 0.05)
+WZ_RANGE = (-0.2, 0.2)
+HEAD_DOWN = (-0.22, 0.22)        # (neck_pitch, head_pitch) deltas, rad: sensor ≈ 25° below level
+HEAD_JITTER = 0.05               # rad, so the slot is a range (alive), not a constant
+HEAD_TRACK_STD = 0.25            # velocity recipe: 0.5 (too loose to hold a 0.22 rad offset)
+SPAWN_YAW = 0.35                 # rad, ±20° around +x (into the step)
+PROGRESS_WEIGHT = 100.0          # × Δz [m]: a 3 cm step-up pays 3.0 once; a fall pays ≈ −7
+PROGRESS_CLIP = 0.01             # m per step
+FOOT_ON_STEP_WEIGHT = 5.0        # × 2 feet, once per episode
+FOOT_ON_STEP_MIN_RISE = 0.012    # m, 80 % of the smallest riser
+IMPACT_WEIGHT = -0.02            # trunk_vertical_accel_penalty is ≥ 0 → negative weight
+TOF_PARAMS = {"sensor_name": tof.TOF_SENSOR_NAME}
+
+
+def make_microduck_step_up_env_cfg(play: bool = False):
+    cfg = make_microduck_walk_v2_terrain_env_cfg(
+        play=play, menu="step_up", finetune=True, v2=True, apex=True, stairs_mode=True,
+    )
+    cfg.episode_length_s = EPISODE_LENGTH_S
+
+    # Perception: the ToF in the scene, the frame in both obs groups (actor last → 125-D).
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + (tof.make_tof_sensor_cfg(),)
+    cfg.observations["actor"].terms["tof"] = ObservationTermCfg(func=tof.tof_depth, params=dict(TOF_PARAMS))
+    cfg.observations["critic"].terms["tof_clean"] = ObservationTermCfg(
+        func=tof.tof_depth, params={**TOF_PARAMS, "clean": True},
+    )
+
+    # Commands: forward into the step; the head slot says "look down".
+    tw = cfg.commands["twist"]
+    tw.ranges.lin_vel_x = VX_RANGE
+    tw.ranges.lin_vel_y = VY_RANGE
+    tw.ranges.ang_vel_z = WZ_RANGE
+    for attr in ("rel_standing_envs", "zero_command_prob", "rel_turn_in_place_envs"):
+        if hasattr(tw, attr):
+            setattr(tw, attr, 0.0)
+    n, h = HEAD_DOWN
+    cfg.commands["head_pose"].ranges = (
+        (n - HEAD_JITTER, n + HEAD_JITTER),
+        (h - HEAD_JITTER, h + HEAD_JITTER),
+        (-0.07, 0.07),
+        (-0.015, 0.015),
+    )
+    cfg.rewards["head_pose_tracking"].params["std"] = HEAD_TRACK_STD
+    cfg.curriculum.pop("head_pose_range", None)       # the inherited widening would undo the offset
+
+    # Spawn facing the step (reset_root_on_terrain is already wired by v2).
+    if not play:
+        cfg.events["reset_base"].params["yaw_range"] = (-SPAWN_YAW, SPAWN_YAW)
+    else:
+        cfg.events["reset_base"].params["pose_range"]["yaw"] = (-SPAWN_YAW, SPAWN_YAW)
+
+    # The step-up stack.
+    contact_sensor = cfg.rewards["low_swing"].params["sensor_name"]
+    cfg.rewards["height_progress"] = RewardTermCfg(
+        func=microduck_mdp.trunk_height_progress, weight=PROGRESS_WEIGHT, params={"clip": PROGRESS_CLIP},
+    )
+    cfg.rewards["foot_on_step"] = RewardTermCfg(
+        func=microduck_mdp.foot_on_step_bonus, weight=FOOT_ON_STEP_WEIGHT,
+        params={"sensor_name": contact_sensor, "min_rise": FOOT_ON_STEP_MIN_RISE},
+    )
+    cfg.rewards["trunk_impact"] = RewardTermCfg(
+        func=microduck_mdp.trunk_vertical_accel_penalty, weight=IMPACT_WEIGHT, params={},
+    )
+    return cfg
+
+
+MicroduckStepUpRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
+MicroduckStepUpRlCfg.experiment_name = "step_up"
+MicroduckStepUpRlCfg.run_name = "step_up_tof"

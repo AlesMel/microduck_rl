@@ -54,6 +54,10 @@ from .microduck_ground_pick_env_cfg import (
     make_microduck_ground_pick_env_cfg,
     MicroduckGroundPickRlCfg,
 )
+from .microduck_step_up_env_cfg import (
+    MicroduckStepUpRlCfg,
+    make_microduck_step_up_env_cfg,
+)
 from .microduck_ball_kick_env_cfg import (
     make_microduck_ball_kick_env_cfg,
     MicroduckBallKickRlCfg,
@@ -204,6 +208,15 @@ register_mjlab_task(
     env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, apex=True, stairs_mode=True, headroom_weight=MODE_HEADROOM_WEIGHT_HR),
     play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs", apex=True, stairs_mode=True, headroom_weight=MODE_HEADROOM_WEIGHT_HR),
     rl_cfg=MicroduckWalkV2StairsModeHRRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StepUp-Tof — the perceptive step-up skill: stairs mode + the head ToF (125-D actor obs).
+register_mjlab_task(
+    task_id="Mjlab-StepUp-Tof-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True),
+    rl_cfg=MicroduckStepUpRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -363,6 +376,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-WalkV2-StairsApex-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True}, MicroduckWalkV2StairsApexRlCfg, _BL_WALK),
     ("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True}, MicroduckWalkV2StairsModeRlCfg, _BL_WALK),
     ("Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True, "headroom_weight": MODE_HEADROOM_WEIGHT_HR}, MicroduckWalkV2StairsModeHRRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-Tof-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {}, MicroduckStepUpRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),
