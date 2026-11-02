@@ -145,6 +145,81 @@ try:
 except Exception as _e:  # pragma: no cover
     print(f"[mdp] Patch 5 NOT applied ({_e!r})")
 
+# Patch 6: warm start ACROSS OBSERVATION WIDTHS. The perceptive step-up actor is 125-D
+# (61 family + 64 ToF) and its critic 149-D; run 4's stairs policy is 61 / 85. With
+# MICRODUCK_WARM_START_EXPAND_OBS=1 every saved tensor whose trailing dim is the old width is
+# padded to the new one before loading: first-layer weight columns and Adam moments with
+# zeros, normalizer mean with 0 and var/std with 1. Iteration 0 is then EXACTLY the loaded
+# policy (the new inputs multiply zero weights) and the ToF columns grow as they earn reward.
+# The normalizer count is shared, so the new inputs' running stats adapt slowly — the ToF
+# encoding is already in [0, 1], which is why that is acceptable. Use together with
+# MICRODUCK_WARM_START=1 (Patch 5) so the curricula restart too.
+WARM_START_EXPAND_ENV = "MICRODUCK_WARM_START_EXPAND_OBS"
+
+
+def _pad_last(t: "torch.Tensor", width: int, fill: float) -> "torch.Tensor":
+    pad = torch.full((*t.shape[:-1], width - t.shape[-1]), fill, dtype=t.dtype, device=t.device)
+    return torch.cat([t, pad], dim=-1)
+
+
+def _needs_pad(saved: "torch.Tensor", target_shape) -> bool:
+    return (hasattr(saved, "shape") and saved.dim() >= 1 and tuple(saved.shape) != tuple(target_shape)
+            and tuple(saved.shape[:-1]) == tuple(target_shape[:-1]) and saved.shape[-1] < target_shape[-1])
+
+
+def expand_checkpoint_obs(loaded: dict, actor_sd_new: dict, critic_sd_new: dict,
+                          params_new: list) -> list[str]:
+    """Pad ``loaded`` (a runner checkpoint dict) in place to the widths of the new actor /
+    critic state dicts and optimizer parameter list. Returns a log of what was padded."""
+    log = []
+    for top, new_sd in (("actor_state_dict", actor_sd_new), ("critic_state_dict", critic_sd_new)):
+        sd = loaded.get(top, {})
+        for k, v in list(sd.items()):
+            if k in new_sd and _needs_pad(v, new_sd[k].shape):
+                fill = 1.0 if k.endswith(("_var", "_std")) else 0.0
+                sd[k] = _pad_last(v, new_sd[k].shape[-1], fill)
+                log.append(f"{top}.{k}: {tuple(v.shape)} → {tuple(sd[k].shape)} (fill {fill})")
+    opt = loaded.get("optimizer_state_dict")
+    if opt:
+        for idx, st in opt.get("state", {}).items():
+            if not isinstance(idx, int) or idx >= len(params_new):
+                continue
+            tgt = params_new[idx].shape
+            for kk in ("exp_avg", "exp_avg_sq"):
+                t = st.get(kk)
+                if t is not None and _needs_pad(t, tgt):
+                    st[kk] = _pad_last(t, tgt[-1], 0.0)
+                    log.append(f"optimizer[{idx}].{kk}: {tuple(t.shape)} → {tuple(st[kk].shape)}")
+    return log
+
+
+try:
+    _orig_runner_load_p6 = _MjlabRunner.load   # Patch 5's wrapper
+
+    def _load_with_obs_expansion(self, path, *args, **kwargs):
+        if os.environ.get(WARM_START_EXPAND_ENV, "") in ("", "0"):
+            return _orig_runner_load_p6(self, path, *args, **kwargs)
+        import tempfile
+        loaded = torch.load(path, map_location="cpu", weights_only=False)
+        params = [p for g in self.alg.optimizer.param_groups for p in g["params"]]
+        log = expand_checkpoint_obs(loaded, self.alg.actor.state_dict(), self.alg.critic.state_dict(), params)
+        if not log:
+            print(f"[mdp] Patch 6: nothing to expand in {path}")
+            return _orig_runner_load_p6(self, path, *args, **kwargs)
+        print(f"[mdp] Patch 6: EXPANDED {path} for a wider observation:\n  " + "\n  ".join(log))
+        with tempfile.NamedTemporaryFile(suffix=".expanded.pt", delete=False) as f:
+            torch.save(loaded, f.name)
+            tmp = f.name
+        try:
+            return _orig_runner_load_p6(self, tmp, *args, **kwargs)
+        finally:
+            os.unlink(tmp)
+
+    _MjlabRunner.load = _load_with_obs_expansion
+    print("[mdp] Patch 6 active: MICRODUCK_WARM_START_EXPAND_OBS=1 pads a narrower checkpoint to the env's obs width")
+except Exception as _e:  # pragma: no cover
+    print(f"[mdp] Patch 6 NOT applied ({_e!r})")
+
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
 

@@ -98,23 +98,48 @@ def test_grid_sees_the_floor_below_the_horizon(tof_env):
     assert d[6].mean() > d[7].mean()                                 # rows further from the floor are longer
 
 
-def test_actor_frame_is_bounded_and_held(tof_env):
-    """Frames are in [0, 1]; between sensor ticks the actor sees the SAME frame (sample-and-hold
-    at 15 Hz on a 50 Hz policy: at most one new frame per 3 steps)."""
+def test_actor_frame_is_bounded(tof_env):
     obs, _ = tof_env.reset()
-    frames = [obs["actor"][:, -64:].clone()]
-    for _ in range(12):
+    for _ in range(6):
         obs = _zero_step(tof_env)
-        frames.append(obs["actor"][:, -64:].clone())
-    f = torch.stack(frames)                                           # [13, N, 64]
-    assert f.min() >= 0 and f.max() <= 1
-    changes = (f[1:] != f[:-1]).any(dim=2).float().sum(dim=0)        # per env, over 12 steps
-    assert torch.all(changes <= 5), changes.tolist()                 # 12 steps / 3.33 = 3.6 ticks (+ the first fill)
-    clean = obs["critic"][:, -64:]
-    assert clean.min() >= 0 and clean.max() <= 1
-    in_range = clean.min(dim=1).values < 0.99                        # a robot with nothing within 1 m sees 1.0 forever
-    assert in_range.any()
-    assert torch.all(changes[in_range] >= 2), changes.tolist()       # new (noisy) frames do arrive
+    assert obs["actor"][:, -64:].min() >= 0 and obs["actor"][:, -64:].max() <= 1
+    assert obs["critic"][:, -64:].min() >= 0 and obs["critic"][:, -64:].max() <= 1
+
+
+class _FakeSensorEnv:
+    """A 2-env scene whose ToF distances change every step, so a held frame is detectable."""
+    def __init__(self):
+        self.num_envs, self.device, self.step_dt = 2, "cpu", 0.02
+        self.k = 0
+        self.scene = type("S", (), {})()
+        self.scene.sensors = {"tof": type("Sen", (), {"data": type("D", (), {})()})()}
+        self.tick()
+
+    def tick(self):
+        self.k += 1
+        self.scene.sensors["tof"].data.distances = torch.full((2, 64), 0.3 + 0.001 * self.k)
+
+
+def test_actor_frame_is_sampled_and_held_at_15_hz():
+    env = _FakeSensorEnv()
+    cfg = type("Cfg", (), {"params": {"noise_rel": 0.0, "noise_abs": 0.0, "dropout_prob": 0.0, "scale_range": 0.0}})()
+    term = tof.tof_depth(cfg, env)
+    term.reset()
+    frames = []
+    for _ in range(40):
+        env.tick()
+        frames.append(term(env).clone())
+    f = torch.stack(frames)                                           # [40, 2, 64]
+    changed = (f[1:] != f[:-1]).any(dim=2)                            # [39, 2]
+    # 40 steps × 0.02 s × 15 Hz = 12 ticks; the hold alternates 3 and 4 steps.
+    assert torch.all(changed.sum(dim=0) >= 11) and torch.all(changed.sum(dim=0) <= 13), changed.sum(dim=0)
+    for e in range(2):
+        idx = torch.nonzero(changed[:, e]).flatten()
+        gaps = (idx[1:] - idx[:-1]).tolist()
+        assert set(gaps) <= {3, 4}, gaps
+    # latency one frame: the value shown is the PREVIOUS measurement, not the one just taken.
+    clean = tof.encode_ranges(env.scene.sensors["tof"].data.distances)
+    assert torch.all(f[-1] <= clean) and not torch.equal(f[-1], clean)
 
 
 def test_reset_blanks_the_frame_buffer(tof_env):

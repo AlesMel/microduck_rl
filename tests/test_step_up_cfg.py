@@ -128,3 +128,39 @@ def test_foot_on_step_pays_once_per_foot():
     assert term(env, "feet", 0.012, 40.0, site_cfg).tolist() == [0.0, 0.0, 0.0]
     term.reset(torch.tensor([0]))
     assert term(env, "feet", 0.012, 40.0, site_cfg).tolist() == [2.0, 0.0, 0.0]
+
+
+# ── warm start across observation widths (Patch 6) ───────────────────────────
+
+def test_expand_checkpoint_obs_pads_first_layer_normalizer_and_adam():
+    old_a, new_a, old_c, new_c, h = 61, 125, 85, 149, 8
+    loaded = {
+        "actor_state_dict": {
+            "obs_normalizer._mean": torch.randn(1, old_a), "obs_normalizer._var": torch.rand(1, old_a) + 0.5,
+            "obs_normalizer._std": torch.rand(1, old_a) + 0.5, "obs_normalizer.count": torch.tensor(72000.0),
+            "distribution.std_param": torch.ones(14), "mlp.0.weight": torch.randn(h, old_a), "mlp.0.bias": torch.zeros(h),
+            "mlp.2.weight": torch.randn(14, h),
+        },
+        "critic_state_dict": {"obs_normalizer._mean": torch.zeros(1, old_c), "mlp.0.weight": torch.randn(h, old_c)},
+        "optimizer_state_dict": {"state": {0: {"step": torch.tensor(5.0), "exp_avg": torch.zeros(14), "exp_avg_sq": torch.zeros(14)},
+                                           1: {"step": torch.tensor(5.0), "exp_avg": torch.ones(h, old_a), "exp_avg_sq": torch.ones(h, old_a)}},
+                                 "param_groups": [{"params": [0, 1]}]},
+    }
+    w_old = loaded["actor_state_dict"]["mlp.0.weight"].clone()
+    actor_new = {k: torch.zeros(*v.shape[:-1], new_a) if v.dim() and v.shape[-1] == old_a else v
+                 for k, v in loaded["actor_state_dict"].items()}
+    critic_new = {k: torch.zeros(*v.shape[:-1], new_c) for k, v in loaded["critic_state_dict"].items()}
+    params = [torch.zeros(14), torch.zeros(h, new_a)]
+    log = microduck_mdp.expand_checkpoint_obs(loaded, actor_new, critic_new, params)
+    a = loaded["actor_state_dict"]
+    assert a["mlp.0.weight"].shape == (h, new_a) and torch.equal(a["mlp.0.weight"][:, :old_a], w_old)
+    assert torch.all(a["mlp.0.weight"][:, old_a:] == 0)                       # new inputs start silent
+    assert a["obs_normalizer._mean"].shape == (1, new_a) and torch.all(a["obs_normalizer._mean"][:, old_a:] == 0)
+    assert torch.all(a["obs_normalizer._var"][:, old_a:] == 1) and torch.all(a["obs_normalizer._std"][:, old_a:] == 1)
+    assert a["obs_normalizer.count"].item() == 72000.0 and a["mlp.2.weight"].shape == (14, h)   # untouched
+    assert loaded["critic_state_dict"]["mlp.0.weight"].shape == (h, new_c)
+    st = loaded["optimizer_state_dict"]["state"]
+    assert st[1]["exp_avg"].shape == (h, new_a) and torch.all(st[1]["exp_avg"][:, old_a:] == 0)
+    assert st[0]["exp_avg"].shape == (14,)
+    assert len(log) == 8                                                       # 4 actor + 2 critic + 2 Adam
+    assert microduck_mdp.expand_checkpoint_obs(loaded, actor_new, critic_new, params) == []   # idempotent
