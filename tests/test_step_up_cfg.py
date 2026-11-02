@@ -62,6 +62,7 @@ def test_commands_point_into_the_step_and_head_down():
     assert "head_pose_range" not in cfg.curriculum
     assert cfg.events["reset_base"].func is microduck_mdp.reset_root_on_terrain
     assert cfg.events["reset_base"].params["yaw_range"] == (-su.SPAWN_YAW, su.SPAWN_YAW)
+    assert cfg.events["reset_base"].params["low_frac"] == su.SPAWN_LOW_FRAC > 0.5
     assert cfg.scene.terrain.terrain_generator.sub_terrains.keys() == {"flat", "single_step", "short_flight"}
 
 
@@ -117,6 +118,8 @@ def test_foot_on_step_pays_once_per_foot():
     cfg = type("Cfg", (), {"params": {}})()
     term = microduck_mdp.foot_on_step_bonus(cfg, env)
     site_cfg = type("SC", (), {"name": "robot", "site_ids": [0, 1]})()
+    env.asset.data.site_pos_w[:, :, 2] = 0.02                             # spawned ON the step: never stood low
+    assert torch.all(term(env, "feet", 0.012, 40.0, site_cfg) == 0)      # → nothing (no free bonus)
     env.asset.data.site_pos_w[:, :, 2] = 0.0
     assert torch.all(term(env, "feet", 0.012, 40.0, site_cfg) == 0)      # on the flat: nothing
     env.asset.data.site_pos_w[0, 0, 2] = 0.02                             # env 0 left foot on the step
@@ -127,7 +130,11 @@ def test_foot_on_step_pays_once_per_foot():
     env.found[1] = 0                                                      # env 1 feet in the air: no pay
     env.asset.data.site_pos_w[1, :, 2] = 0.03
     assert term(env, "feet", 0.012, 40.0, site_cfg).tolist() == [0.0, 0.0, 0.0]
-    term.reset(torch.tensor([0]))
+    term.reset(torch.tensor([0]))                                         # new episode: latch cleared
+    assert term(env, "feet", 0.012, 40.0, site_cfg).tolist() == [0.0, 0.0, 0.0]   # still on the step: no pay
+    env.asset.data.site_pos_w[0, :, 2] = 0.0                                # both feet down to the ground
+    term(env, "feet", 0.012, 40.0, site_cfg)
+    env.asset.data.site_pos_w[0, :, 2] = 0.02                               # and up together
     assert term(env, "feet", 0.012, 40.0, site_cfg).tolist() == [2.0, 0.0, 0.0]
 
 

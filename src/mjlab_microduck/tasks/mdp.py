@@ -3879,7 +3879,13 @@ class reset_root_on_terrain:
 
     def __call__(self, env, env_ids: "torch.Tensor", span: float = 1.7, res: float = 0.05, flat_tol: float = 0.03,
                  yaw_range: tuple = (-math.pi, math.pi), z_clearance: tuple = (0.125, 0.135), candidates: int = 8,
+                 low_frac: float = 0.0, low_tol: float = 0.005,
                  asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> None:
+        """``low_frac``: this fraction of the resets is restricted to cells at the tile origin's
+        ground level (height ≤ origin z + ``low_tol``) — for step-up tiles, the approach platform
+        BELOW the step, so most episodes have to climb; the rest spawn anywhere usable (on the
+        step too: the reverse curriculum). The fallback for a robot with no usable candidate is
+        the origin cell, which is on the approach as well."""
         del span, res, flat_tol  # consumed at init
         asset = env.scene[asset_cfg.name]
         terrain = env.scene.terrain
@@ -3888,6 +3894,11 @@ class reset_root_on_terrain:
         patch = terrain.terrain_levels[env_ids] * self.cols + terrain.terrain_types[env_ids]
         cand = torch.randint(0, self.n, (N, candidates, 2), device=dev)
         ok = self.allowed[patch.unsqueeze(1), cand[..., 0], cand[..., 1]]   # [N, candidates]
+        if low_frac > 0:
+            ground = env.scene.env_origins[env_ids, 2].unsqueeze(1) + low_tol
+            low = self.heights[patch.unsqueeze(1), cand[..., 0], cand[..., 1]] <= ground
+            want_low = (torch.rand(N, device=dev) < low_frac).unsqueeze(1)
+            ok = ok & (low | ~want_low)
         has = ok.any(dim=1)
         first = torch.argmax(ok.int(), dim=1)
         ij = cand[torch.arange(N, device=dev), first]
@@ -8579,6 +8590,7 @@ class foot_on_step_bonus:
     at 2 per episode: no per-step jackpot for camping on the step. ≥ 0 → POSITIVE weight."""
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         self.paid = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
+        self.was_low = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
 
     def __call__(self, env: ManagerBasedRlEnv, sensor_name: str, min_rise: float = 0.012,
                  gate_tilt_above_deg: float = 40.0,
@@ -8587,7 +8599,10 @@ class foot_on_step_bonus:
         contact = env.scene[sensor_name].data.found[:, :2] > 0                        # (B, 2)
         foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2] - env.scene.env_origins[:, 2:3]
         upright = (1.0 - _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)).bool()[:, None]
-        on_step = contact & (foot_z >= min_rise) & upright
+        # A foot earns only if it stood on the GROUND first this episode — a robot spawned on the
+        # step (reverse curriculum) does not get paid for being there (run 6, 2026-11-02).
+        self.was_low |= contact & (foot_z < 0.5 * min_rise)
+        on_step = contact & (foot_z >= min_rise) & upright & self.was_low
         new = on_step & ~self.paid
         self.paid |= on_step
         return new.float().sum(dim=1)
@@ -8595,3 +8610,4 @@ class foot_on_step_bonus:
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         ids = slice(None) if env_ids is None else env_ids
         self.paid[ids] = False
+        self.was_low[ids] = False

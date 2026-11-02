@@ -21,9 +21,11 @@ small step-up stack:
              trunk_height_progress   potential-based Δz, rising pays, hopping nets zero
              foot_on_step            1 per foot, once per episode, contact ≥ 1.2 cm above origin
              trunk_vertical_accel    |a_z| impact cost
-  spawns   reset_root_on_terrain (any usable cell of the tile, yaw ±20° toward +x): the top
-           platform is ≈ half the tile, so a reverse curriculum (starting on top, or at the
-           edge) comes for free; the ladder is the survival rule.
+  spawns   reset_root_on_terrain, yaw ±20° toward +x, 80 % on the approach BELOW the step
+           (low_frac) so most episodes have to climb; 20 % anywhere usable (on top too) as
+           the reverse curriculum. Run 6's first launch spawned anywhere: half the robots
+           started on top, were promoted by the survival ladder without meeting a step and
+           collected the foot-on-step bonus for free — hence low_frac and the bonus latch.
   warm     MICRODUCK_WARM_START_EXPAND_OBS=1 loads run 4's 61-D actor into the 125-D one
            (ToF columns zero): iteration 0 IS the blind stairs policy.
 
@@ -52,6 +54,7 @@ HEAD_DOWN = (-0.22, 0.22)        # (neck_pitch, head_pitch) deltas, rad: sensor 
 HEAD_JITTER = 0.05               # rad, so the slot is a range (alive), not a constant
 HEAD_TRACK_STD = 0.25            # velocity recipe: 0.5 (too loose to hold a 0.22 rad offset)
 SPAWN_YAW = 0.35                 # rad, ±20° around +x (into the step)
+SPAWN_LOW_FRAC = 0.8             # resets on the approach (below the step); the rest anywhere = reverse curriculum
 PROGRESS_WEIGHT = 100.0          # × Δz [m]: a 3 cm step-up pays 3.0 once; a fall pays ≈ −7
 PROGRESS_CLIP = 0.01             # m per step
 FOOT_ON_STEP_WEIGHT = 5.0        # × 2 feet, once per episode
@@ -95,6 +98,7 @@ def make_microduck_step_up_env_cfg(play: bool = False):
     # Spawn facing the step (reset_root_on_terrain is already wired by v2).
     if not play:
         cfg.events["reset_base"].params["yaw_range"] = (-SPAWN_YAW, SPAWN_YAW)
+        cfg.events["reset_base"].params["low_frac"] = SPAWN_LOW_FRAC
     else:
         cfg.events["reset_base"].params["pose_range"]["yaw"] = (-SPAWN_YAW, SPAWN_YAW)
 
