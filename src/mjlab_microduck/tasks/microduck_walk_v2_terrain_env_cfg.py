@@ -121,6 +121,23 @@ weight that actually competes (−3 → −10..−15, or reserve 0.6) to see whe
 habit or necessity — if the knee still sits at 1.00 before falls, the ceiling is hardware (mass,
 gearing, or a higher current limit on the real servo), not the gait.
 
+RUN 5 — STAIRS MODE HR (2026-11-01/02, Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck from
+run 4's model_2999, wandb fkl8d1ta): run 4 with torque_headroom −3 → −12, nothing else. Reward
+125, ladder 3.58 (run 4: 3.53). torque_headroom read −0.125..−0.155/step from it 300 to 2999 —
+RAW 0.011, the same the policy paid at −3 (0.015). 4× the price bought no reserve:
+  - flat knee p99 0.93 at 0.3 m/s (run 4: 0.91, run 3: 0.86); hip 0.64. The policy traded
+    APEX instead: flat p10/median at 0.3 m/s 2.5/2.7 cm (run 4: 2.9/3.3), 0.2 m/s 2.2/2.4;
+  - stairs at 0.3 m/s, feasibility: row 2 3/9 fell, row 3 6/8 fell (2 made the landing),
+    knee at the cap 17-24 % of the 0.3 s before a fall, hip and knee p99 = 1.00 on rows 2-3;
+    14 s video: rows 0-1 all crossed, row 2 5/9 fell, row 3 8/8 fell (one reached the end
+    platform after falling).
+VERDICT: the cap-hugging is necessity, not habit. Two weights (−3, −12) and three speeds
+leave the knee at 1.00 of the 1.75 A current cap on every 2.4-3.0 cm step-up, and pricing it
+only lowers the swing. The stairs ceiling for this robot is ≈ 2 cm risers at 0.3 m/s; above
+that it is hardware — a higher current limit on the real XL330 (check the register the daemon
+writes), less head mass, or a knee gear change — not reward design. Run 4 (ljdgj6pq
+model_2999) is the stairs policy to keep: highest apex, best row 2.
+
 Preview the terrain with the robot standing on it, and check that every spawn is a stable
 stance, with::
 
