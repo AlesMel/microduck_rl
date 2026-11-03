@@ -50,7 +50,9 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
     origins_z = env.scene.env_origins[:, 2]
     z0 = (robot.data.root_link_pos_w[:, 2] - origins_z).clone()
     x0 = robot.data.root_link_pos_w[:, 0].clone()
-    zs, xs, falls = [], [], []
+    zs, xs, falls, heads = [], [], [], []
+    jn = robot.joint_names
+    head_ids = [jn.index("neck_pitch"), jn.index("head_pitch")]
     snap_at = {round(t / env.step_dt) for t in (0.5, 1.5, 2.5, 4.0)}
     focus = next((int(i) for i in np.argsort(-levels) if names[types[i]] == "single_step"), 0)
     with torch.no_grad():
@@ -59,13 +61,21 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
             zs.append((robot.data.root_link_pos_w[:, 2] - origins_z).cpu().numpy())
             xs.append((robot.data.root_link_pos_w[:, 0] - x0).cpu().numpy())
             falls.append(term.cpu().numpy().astype(bool))
+            heads.append(robot.data.joint_pos[:, head_ids].cpu().numpy())
             if snapshots and k in snap_at:
                 np.set_printoptions(precision=2, suppress=True, linewidth=120)
                 print(f"\nToF of robot {focus} ({names[types[focus]]} row {int(levels[focus])}) at t = {k * env.step_dt:.1f} s, "
                       f"x {xs[-1][focus]:.2f} m, trunk rise {100 * (zs[-1][focus] - z0[focus].item()):.1f} cm:")
                 print(grid_of(env, focus))
-    zs, xs, falls = np.stack(zs), np.stack(xs), np.stack(falls)
+    zs, xs, falls, heads = np.stack(zs), np.stack(xs), np.stack(falls), np.stack(heads)
     z0 = z0.cpu().numpy()
+    # Does the policy move the head? Per-robot std of the sensor pitch (neck + head pitch deltas
+    # both pitch the beam, with opposite signs) over the rollout, on the step tiles.
+    step_mask = np.array([names[types[i]] in STEP_TILES for i in range(n)])
+    beam_pitch = heads[:, :, 1] - heads[:, :, 0]                      # + = down (head +, neck −)
+    head_std = float(np.median(beam_pitch[:, step_mask].std(axis=0)))
+    head_range = float(np.median(beam_pitch[:, step_mask].max(axis=0) - beam_pitch[:, step_mask].min(axis=0)))
+    print(f"head motion on step tiles: beam pitch std median {np.degrees(head_std):.1f}°, range median {np.degrees(head_range):.1f}°")
     out: dict[str, dict] = {}
     for i in range(n):
         tile = names[types[i]]
@@ -103,7 +113,8 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
         for k in ("t_top_s", "rise_cm", "x_max_m"):
             o.pop(k)
     print(f"  TOTAL on top {tot_top}/{tot}, fell {tot_fell}/{tot}")
-    out["total"] = {"on_top": tot_top, "fell": tot_fell, "robots": tot, "blind": blind}
+    out["total"] = {"on_top": tot_top, "fell": tot_fell, "robots": tot, "blind": blind,
+                    "head_pitch_std_deg": float(np.degrees(head_std)), "head_pitch_range_deg": float(np.degrees(head_range))}
     return out
 
 

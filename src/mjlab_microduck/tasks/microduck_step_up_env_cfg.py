@@ -59,6 +59,23 @@ collapse may be OOD rather than lost information; a flat-floor frame ablation wo
 the fairer control. Video: scripts/view_terrain_env.py on the step-up grid (run6_step_up_tof).
 Next levers: longer training (the curve never saturated by any visible metric), the
 flat-floor ablation, and the runtime side (obs_len 125 policy kind + ToF append).
+
+RUNS 7 / 7b (2026-11-03, both from run 6's model_2999, 1024 envs × 6000 it in parallel on one
+GPU, eval = step_up_eval.py, 96 robots, 8 s, vx 0.25, same seed; run 6 re-evaluated alongside):
+                               run 6 (3000 it)   run 7 (+6000 it)   run 7b FREE HEAD (+6000 it)
+  sighted, on top / fell       49/86 / 14        49/86 / 18          64/86 / 14
+    single_step 3.1 cm         5/15              10/15               13/15
+    single_step 3.7 cm         8/13              4/13 (9 fell)       8/13
+    short_flight 11.1 cm       6/12              5/12                6/12
+  blind (ToF := 1.0)           5/86 / 71         15/86 / 50          18/86 / 53
+  beam-pitch std on step tiles 6.1°              4.6°                8.7°
+  - Run 7 (wandb 9r89j05z): twice the samples bought nothing — the recipe is converged.
+  - Run 7b (wandb 3fwrducu, head_pose_tracking 2.0 → 0.5, std 0.25 → 0.5): +15 robots on top
+    at the same fall count; 3.1 cm single steps 13/15. The head moves more (std 8.7° vs 4.6°)
+    but is not "looking at the step" in a deliberate way — the gain is more likely the policy
+    being free to hold the sensor where it wants it (it still pitches down) than active scanning.
+  - Blind baselines of all three sit at 5-18/86: the sensor is doing the work in every run.
+  Keeper: run 7b model_5999 (logs/rsl_rl/step_up/2026-11-03_00-51-55_step_up_tof_freehead).
 """
 from copy import deepcopy
 

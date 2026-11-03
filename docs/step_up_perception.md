@@ -112,3 +112,11 @@ three-riser flight 4/12) with 11 falls; the same network with the ToF frame blan
 top 15/86 with 61 falls, i.e. back at the blind walk's ≈ 2 cm ceiling. No wandb aggregate
 showed it — the survival ladder plateaued at 5.9 — the sighted/blind eval did
 (`scripts/eval/step_up_eval.py --blind`). Details in the env cfg docstring.
+
+## 9. Runs 7 and 7b (2026-11-03)
+
+Doubling the training (run 7) changed nothing: 49/86 on top, as run 6. Loosening the head
+tracking (run 7b, `Mjlab-StepUp-Tof-FreeHead-MicroDuck`: weight 2.0 → 0.5, std 0.25 → 0.5)
+gave 64/86 on top with 14 falls — 3.1 cm single steps 13/15, 3.7 cm 8/13, 11 cm flights 6/12.
+Blind baselines stay at 5–18/86 for every run. Run 7b's model_5999 is the policy to publish
+once the runtime side is merged. Details in the env cfg docstring.
