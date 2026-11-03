@@ -223,3 +223,6 @@ MicroduckStepUpFreeHeadRlCfg.run_name = "step_up_tof_freehead"
 
 MicroduckStepUpOracleRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
 MicroduckStepUpOracleRlCfg.run_name = "step_up_oracle_clean"
+
+MicroduckStepUpTofCleanRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpTofCleanRlCfg.run_name = "step_up_tof_clean"

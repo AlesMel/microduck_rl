@@ -57,6 +57,7 @@ from .microduck_ground_pick_env_cfg import (
 from .microduck_step_up_env_cfg import (
     MicroduckStepUpFreeHeadRlCfg,
     MicroduckStepUpOracleRlCfg,
+    MicroduckStepUpTofCleanRlCfg,
     MicroduckStepUpRlCfg,
     make_microduck_step_up_env_cfg,
 )
@@ -232,6 +233,17 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# StepUp-Tof-Clean — run 9: the ToF (free head, as run 7b) with run 8's clean-stepping objective.
+# Differs from StepUp-Oracle-Clean ONLY in perception, so the two runs split the oracle's gain
+# into "the objective" and "perfect terrain memory".
+register_mjlab_task(
+    task_id="Mjlab-StepUp-Tof-Clean-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(free_head=True, perception="tof", clean_feet=True),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True, free_head=True, perception="tof", clean_feet=True),
+    rl_cfg=MicroduckStepUpTofCleanRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # StepUp-Tof-FreeHead — the same skill with the head free to aim the sensor (run 7b).
 register_mjlab_task(
     task_id="Mjlab-StepUp-Tof-FreeHead-MicroDuck",
@@ -400,6 +412,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-StepUp-Tof-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {}, MicroduckStepUpRlCfg, _BL_WALK),
     ("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True}, MicroduckStepUpFreeHeadRlCfg, _BL_WALK),
     ("Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"perception": "oracle", "clean_feet": True}, MicroduckStepUpOracleRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-Tof-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof", "clean_feet": True}, MicroduckStepUpTofCleanRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),
