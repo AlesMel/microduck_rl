@@ -171,3 +171,32 @@ Reading the result: if the clean-climb rate (step_up_failures.py) is high up to 
 perception/memory is the bottleneck below it and the ToF height map is worth building; the
 height where it breaks down is the robot's envelope (stop above it). If it is low everywhere,
 the gait/actuators are the limit and no sensor will fix it.
+
+## 12. Run 8 result: perfect terrain memory removes the falls, not all the bumps (2026-11-03)
+
+`step_up_failures.py`, 384 robots, 12 s, same seed; run 7b re-measured on the same battery.
+"clean" = ended on top with no toe catch and no edge landing; "no hard" = no catch with
+|Fx| > 0.5 Fz and no edge landing.
+
+| step | riser | 7b ToF 0.25 clean / no hard / fell | 8 oracle 0.25 clean / no hard / fell | 8 oracle 0.15 clean / no hard / fell |
+| --- | --- | --- | --- | --- |
+| single | 2.0 cm | 15 % / 24 % / 2 of 41 | 71 % / 85 % / 0 | 37 % / 73 % / 1 |
+| single | 2.5 cm | 6 % / 21 % / 3 of 53 | 91 % / 96 % / 0 | 75 % / 85 % / 1 |
+| single | 3.1 cm | 5 % / 16 % / 4 of 43 | 88 % / 93 % / 0 | 74 % / 77 % / 0 |
+| single | 3.9 cm | 0 % / 4 % / 25 of 55 | 76 % / 84 % / 1 | 75 % / 80 % / 0 |
+| flight ×3 | 2.0 cm | 0 % / 0 % / 2 of 53 | 21 % / 55 % / 0 | 28 % / 55 % / 0 |
+| flight ×3 | 2.6 cm | 0 % / 3 % / 7 of 29 | 34 % / 66 % / 0 | 28 % / 69 % / 0 |
+| flight ×3 | 3.3 cm | 0 % / 0 % / 7 of 27 | 41 % / 63 % / 0 | 22 % / 33 % / 0 |
+| flight ×3 | 3.6 cm | 0 % / 2 % / 18 of 44 | 43 % / 59 % / 0 | 30 % / 57 % / 1 |
+| all | | 11 / 345 clean, 68 falls | 208 / 345 clean, 1 fall, 10 stalls | 170 / 345 clean, 3 falls |
+
+- Falls 68 → 1. Single steps up to 3.9 cm are 76-91 % clean: the "torque ceiling" of the
+  blind stairs runs was mostly a strategy/information problem — with the terrain known, the
+  same actuators climb 3.9 cm without kicking three times in four.
+- Flights (three risers, 15 cm treads) stay at 21-43 % clean: the feet have to fit 10 cm of
+  usable tread per step, which needs stride adaptation the policy has not learned yet.
+- Slower is still not cleaner (0.15 m/s: 170 vs 208).
+- CONFOUND: run 8 changed the information (exact scan) AND the objective (edge cost, fall
+  penalty, dt-sized step stack, clean ladder) AND the warm start (run 4, not 7b). The next run
+  separates them: the ToF policy with the same clean objective. If it approaches the oracle, the
+  height map is not needed; if not, the oracle's margin is what the map is worth.
