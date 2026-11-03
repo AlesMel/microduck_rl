@@ -345,6 +345,105 @@ def render(a) -> None:
     print("video →", a.video)
 
 
+# ── compare: two policies side by side on the same step ────────────────────
+
+def _feet_at(st, k: int, hero: int):
+    if "foot_pos" not in st:
+        return None
+    found = st["foot_found"][k, hero]
+    edges_now = st["foot_edge"][k, hero] > (st["foot_edge"][k - 1, hero] if k else 0)
+    return st["foot_pos"][k, hero], found, np.array([bool(edges_now and found[f]) for f in range(2)])
+
+
+def _card(width: int, height: int, lines: list[str]) -> np.ndarray:
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (width, height), (12, 12, 16))
+    draw = ImageDraw.Draw(img)
+    y = height // 2 - 26 * len(lines)
+    for j, t in enumerate(lines):
+        f = _font(40 if j == 0 else 28)
+        w = draw.textlength(t, font=f)
+        draw.text(((width - w) / 2, y), t, font=f, fill=(255, 255, 255) if j == 0 else (210, 210, 220))
+        y += 64 if j == 0 else 46
+    return np.asarray(img)
+
+
+def compare(a) -> None:
+    """Left / right panes, one policy each, the same tile and row of the same grid, a fixed camera
+    over the hero's left shoulder. Heroes are NOT the best robots: the ``--pick``-th robot on that
+    tile and row that still had its approach ahead of it (trunk rise < 30 % of the riser at 0.6 s).
+    A hero that falls is frozen at its last frame with FELL over it (the env resets it after)."""
+    import imageio.v2 as imageio
+    from PIL import Image, ImageDraw
+    sides = []
+    for path, label in ((a.left, a.left_label), (a.right, a.right_label)):
+        st = np.load(path, allow_pickle=False)
+        N = st["qpos"].shape[1]
+        env = build_env(str(st["task"]), N, a.seed, "cpu", fixed_heading=False)
+        sides.append(dict(st=st, mode=str(st["mode"]), shw=Showcase(env, a.width // 2, a.height), label=label,
+                          names=[str(n) for n in st["names"]], N=N, dt=float(st["dt"])))
+    T = min(s_["st"]["qpos"].shape[0] for s_ in sides)
+    writer = imageio.get_writer(a.video, fps=FPS, codec="libx264", quality=8, macro_block_size=1)
+    try:
+        for _ in range(2 * FPS):
+            writer.append_data(_card(a.width + 4, a.height, [a.title, f"left: {a.left_label}", f"right: {a.right_label}",
+                                                         "same step · feet: green = clean contact, red = edge"]))
+        for seg in a.segments.split(","):
+            tile, row = seg.split(":")
+            row = int(row)
+            label = {"single_step": "single step", "short_flight": "three-riser flight"}.get(tile, tile)
+            heroes = []
+            for sd in sides:
+                st, names = sd["st"], sd["names"]
+                k06 = min(int(round(0.6 / sd["dt"])), T - 1)
+                cands = [i for i in range(sd["N"]) if names[st["types"][i]] == tile and int(st["levels"][i]) == row
+                         and st["rise"][k06, i] < 0.3 * st["riser"][i]]
+                assert cands, f"no robot with its approach ahead on {tile} row {row} in {sd['label']}"
+                hero = cands[a.pick % len(cands)]
+                fk = np.nonzero(st["fallen"][:, hero])[0]
+                heroes.append((hero, int(fk[0]) if len(fk) else None))
+                print(f"{sd['label']}: {tile} row {row} hero {hero}, riser {100 * st['riser'][hero]:.1f} cm, "
+                      f"fell at frame {heroes[-1][1]}, edge contacts {int(st['foot_edge'][-1, hero])}")
+            for k in range(T):
+                imgs = []
+                for sd, (hero, fk) in zip(sides, heroes):
+                    st, mode = sd["st"], sd["mode"]
+                    fell = fk is not None and k >= fk
+                    kk = max(fk - 1, 0) if fell else k
+                    cam = mujoco.MjvCamera()
+                    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                    cam.lookat[:] = st["qpos"][kk, hero, :3] + np.array([0.25, 0.0, -0.04])
+                    cam.distance, cam.azimuth, cam.elevation = 1.1, -62.0, -14.0
+                    frame = sd["shw"].render(st["qpos"][kk], hero, cam, st["spos"][kk, hero] if mode == "tof" else None,
+                                             st["hits"][kk, hero], st["dists"][kk, hero] if mode == "tof" else None,
+                                             mode=mode, scan_values=st["frames_in"][kk, hero] if mode == "scan" else None,
+                                             feet=_feet_at(st, kk, hero))
+                    lines = [sd["label"], f"{label} · riser {100 * st['riser'][hero]:.1f} cm",
+                             f"t = {k * sd['dt']:4.1f} s · edge contacts {int(st['foot_edge'][kk, hero])}"]
+                    img = _compose(frame, st["frames_in"][kk, hero], lines, "", mode=mode,
+                                   scan_shape=st["scan_shape"] if "scan_shape" in st else (0, 0))
+                    if fell:
+                        pim = Image.fromarray(img)
+                        d = ImageDraw.Draw(pim)
+                        f = _font(72)
+                        w = d.textlength("FELL", font=f)
+                        d.text(((pim.width - w) / 2, pim.height / 2 - 40), "FELL", font=f, fill=(235, 40, 30),
+                               stroke_width=3, stroke_fill=(0, 0, 0))
+                        img = np.asarray(pim)
+                    imgs.append(img)
+                    if len(imgs) == 1:
+                        imgs.append(np.full((img.shape[0], 4, 3), 255, dtype=np.uint8))   # divider
+                writer.append_data(np.concatenate(imgs, axis=1))
+        if a.summary:
+            for _ in range(4 * FPS):
+                writer.append_data(_card(a.width + 4, a.height, a.summary))
+    finally:
+        writer.close()
+        for sd in sides:
+            sd["shw"].close()
+    print("video →", a.video)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -364,8 +463,21 @@ def main() -> None:
     v.add_argument("--width", type=int, default=1280)
     v.add_argument("--height", type=int, default=720)
     v.add_argument("--hero", type=int, default=None, help="force one robot as the hero")
+    c = sub.add_parser("compare")
+    c.add_argument("--left", required=True, help="states .npz of the left policy")
+    c.add_argument("--right", required=True)
+    c.add_argument("--left-label", default="left")
+    c.add_argument("--right-label", default="right")
+    c.add_argument("--title", default="Same step, two policies")
+    c.add_argument("--segments", default="single_step:3,short_flight:3", help="tile:row,...")
+    c.add_argument("--pick", type=int, default=0, help="which qualifying robot (0 = the first by index)")
+    c.add_argument("--summary", nargs="*", default=None, help="lines of an end card")
+    c.add_argument("--video", default="compare.mp4")
+    c.add_argument("--seed", type=int, default=0)
+    c.add_argument("--width", type=int, default=1920)
+    c.add_argument("--height", type=int, default=600)
     a = p.parse_args()
-    record(a) if a.cmd == "record" else render(a)
+    {"record": record, "render": render, "compare": compare}[a.cmd](a)
 
 
 if __name__ == "__main__":
