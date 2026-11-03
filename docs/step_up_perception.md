@@ -253,3 +253,69 @@ seen (the policy must be told which cells are unknown), and the edge is placed t
 cell, not better. The sim ToF casts each zone's centre ray; the real VL53L8CX integrates the
 cone and mixes targets at an edge, so the real edge will be blurrier — to check against real
 frames from `robotctl monitor` → `t` in front of a real step.
+
+## 15. Run 10: the map the robot can build matches the oracle (2026-11-03, wandb w4z8f80u)
+
+Run 10 (`Mjlab-StepUp-TofMap-Clean-Backlash-MicroDuck`, 2048 envs × 4000 it, 1 h 45 min) is run 8
+with the actor's exact scan replaced by the §14 map (`tasks/tof_map.py`: 15 Hz noisy ToF frames
++ drifting odometry → 2 cm grid, running mean, lateral splat) read in the oracle's 19 × 7 layout
+plus a known-cell mask (61 + 266-D actor); the critic keeps the exact scan. Warm start from run 8's
+model_3999 (`MICRODUCK_WARM_START_EXPAND_OBS=1`: the scan columns copied, the mask columns zero),
+so iteration 0 was the oracle policy reading a noisier, partly unknown version of its input.
+Training: terrain level 2.5 → 5.4 by iteration 1000, flat after (run 8 ended at 5.5); reward
+45 vs the oracle's 51, falls per iteration 0.9 vs 0.6. Same 384-robot battery, vx 0.25, 12 s,
+same seed (`failures_10.json`):
+
+| step | riser | 9 ToF only clean / fell | 8 oracle clean / no hard / fell | 10 ToF map clean / no hard / fell / stalled |
+| --- | --- | --- | --- | --- |
+| single | 2.0 cm | 10 % / 0 | 71 % / 85 % / 0 | 83 % / 88 % / 0 / 0 |
+| single | 2.5 cm | 13 % / 1 | 91 % / 96 % / 0 | 79 % / 87 % / 0 / 0 |
+| single | 3.1 cm | 9 % / 4 | 88 % / 93 % / 0 | 86 % / 93 % / 0 / 0 |
+| single | 3.9 cm | 2 % / 30 | 76 % / 84 % / 1 | 65 % / 71 % / 2 / 4 |
+| flight ×3 | 2.0 cm | 2 % / 3 | 21 % / 55 % / 0 | 34 % / 57 % / 1 / 0 |
+| flight ×3 | 2.6 cm | 0 % / 5 | 34 % / 66 % / 0 | 62 % / 72 % / 1 / 0 |
+| flight ×3 | 3.3 cm | 0 % / 8 | 41 % / 63 % / 0 | 67 % / 70 % / 1 / 0 |
+| flight ×3 | 3.6 cm | 0 % / 28 | 43 % / 59 % / 0 | 57 % / 68 % / 1 / 8 |
+| all | | 17 / 345 clean, 79 falls | 208 / 345 clean, 1 fall, 10 stalls | 228 / 345 clean, 6 falls, 12 stalls |
+
+- **The map closes the gap.** Same sensor as run 9 (riser in view for 315 / 345 robots, then out of
+  the frame for 1.24 s / 37 cm before the foot lands on it — unchanged), 17 → 228 clean climbs,
+  79 → 6 falls, toe catches 980 → 132. Everything run 8 had and run 9 lacked was memory of the
+  terrain, and a map built from the real sensor's noise, dropouts and a drifting odometry holds
+  it well enough.
+- **Single steps up to 3.1 cm: 79-86 % clean, no falls.** 3.9 cm: 65 % clean, 2 falls and 4
+  stalls in 55 — the top of the envelope, where "refuse" starts to appear by itself.
+- **Flights are better than the oracle's** (57-67 % vs 34-43 % at 2.6-3.6 cm). Caveat: run 10 is
+  run 8 plus another 4000 iterations, so part of this is training time, not the map; the oracle
+  was not trained on for comparison. The remaining flight failures are stalls at 3.6 cm (8) and one
+  fall per row.
+- The policy does not slow down for the step (0.25 → 0.26 m/s) and holds the sensor 26° below
+  level; it reads the map, not the riser.
+- Video: `showcase_10.mp4` (beams, the map as the policy reads it with never-seen cells hollow,
+  foot halos), `compare_9_10.mp4` (same step, ToF alone vs ToF + map), `compare_8_10.mp4` (oracle
+  vs the buildable map), all on urkui-3.
+
+Checkpoint: `logs/rsl_rl/step_up/2026-11-03_20-30-50_step_up_tofmap_clean/model_3999.pt`
+(urkui-3). This is the first step-up policy whose every input exists on the robot.
+
+### Next
+
+1. **Runtime side** (`microduck` repo): build the same map in `robotd` — `kinematics::tof::Reprojector`
+   hit points + leg odometry into a 2 cm grid anchored at policy start, running mean, lateral splat,
+   the 19 × 7 query in the trunk's estimated yaw frame, `[values, known]` encoding with unknown = 0
+   — and a policy kind with `obs_len 327`. `publish` needs the matching perception kind (`tof_map`,
+   layout in the manifest) read off the ONNX width. Export run 10 and rehearse the full obs
+   contract in `scripts/infer_policy.py` first.
+2. **Sensor-model check against real frames**: the sim casts one ray per zone; the VL53L8CX
+   integrates a cone and mixes targets at an edge, so the real edge is blurrier. Record `robotctl
+   monitor → t` in front of a real 3 cm step and compare the map it produces with §14's error table
+   before trusting the 65-86 % numbers. Widen the sim's edge blur / drift DR if the real map is worse.
+3. **The envelope and the refusal**: the requirement is "too high → stop". 3.9 cm already shows
+   stalls; measure where falls begin (add a 4.5 and 5 cm row to the battery) and decide whether to
+   train an explicit stop (a "no step" posture command, or a hard cap on the map's visible rise
+   that the reward turns into stopping) or to leave the refusal to the policy.
+4. **Flights**: stride adaptation on 15 cm treads is the remaining skill gap (57-67 %). Longer
+   training alone is unlikely to be enough (run 7 lesson); candidates are tread-length DR and a
+   foot-placement term on the map's level cells.
+5. Train the oracle for the same extra 4000 iterations if the "map beats oracle" question matters
+   for the design; otherwise it does not change the plan.
