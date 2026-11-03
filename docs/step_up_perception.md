@@ -200,3 +200,30 @@ the gait/actuators are the limit and no sensor will fix it.
   penalty, dt-sized step stack, clean ladder) AND the warm start (run 4, not 7b). The next run
   separates them: the ToF policy with the same clean objective. If it approaches the oracle, the
   height map is not needed; if not, the oracle's margin is what the map is worth.
+
+## 13. Run 9: the objective alone does nothing — the gap is terrain memory (2026-11-03)
+
+Run 9 (`Mjlab-StepUp-Tof-Clean-Backlash-MicroDuck`, wandb e48wxpyn) = run 8 with the head ToF
+(free head) instead of the exact height scan; same objective, warm start (run 4), budget. Same
+384-robot battery, vx 0.25:
+
+| step | riser | 7b ToF | 9 ToF + clean objective | 8 exact scan + clean objective |
+| --- | --- | --- | --- | --- |
+| single | 2.0 cm | 15 % clean, 5 % fell | 10 % clean, 0 % fell | 71 % clean, 0 % fell |
+| single | 2.5 cm | 6 %, 6 % | 13 %, 2 % | 91 %, 0 % |
+| single | 3.1 cm | 5 %, 9 % | 9 %, 9 % | 88 %, 0 % |
+| single | 3.9 cm | 0 %, 45 % | 2 %, 55 % | 76 %, 2 % |
+| flight ×3 | 2.0-3.6 cm | 0 %, 4-41 % | 0-2 %, 6-64 % | 21-43 %, 0 % |
+| all | | 11 / 345 clean, 68 falls | 17 / 345 clean, 79 falls | 208 / 345 clean, 1 fall |
+
+Pricing edge contact and falls changed nothing for the ToF policy: it still kicks (980 toe
+catches on 270 robots) because it still cannot see the riser for the last 21 cm / 1.1 s (head
+pitched 30° down, visible ground from 17 cm ahead of the toes). The whole of run 8's gain is
+the terrain information. Decision: the step-up skill needs MEMORY of the terrain between seeing
+it and stepping on it. Two ways, cheapest first:
+
+1. a recurrent actor on the ToF (training-side only; the runtime runs recurrent policies) — if
+   it approaches run 8, nothing else is needed;
+2. a body-frame height map built from the ToF and odometry, in the oracle's exact layout
+   (19 × 7, 3 cm), with sim-side drift/noise/unseen-cell DR, and the same map built in `robotd`
+   from `kinematics::tof::Reprojector` + leg odometry.
