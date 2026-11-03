@@ -134,7 +134,9 @@ def _actor_layout(env) -> list | None:
             for d in dim:
                 width *= int(d)
             if off >= OBS_DIM:
-                if "tof" in name and width == TOF_BLOCK:
+                if hasattr(cfg.func, "mirror_layout"):
+                    segs.append((off, width, tuple(cfg.func.mirror_layout)))
+                elif "tof" in name and width == TOF_BLOCK:
                     segs.append((off, width, ("tof",)))
                 elif getattr(cfg.func, "__name__", "") == "terrain_height_scan":
                     from mjlab_microduck.tasks.mdp import scan_grid
@@ -165,8 +167,9 @@ def mirror_actor_obs(actor: torch.Tensor, obs_perm: torch.Tensor, obs_sign: torc
             seg = actor[:, off:off + width]
             if kind[0] == "tof":
                 seg = seg.reshape(-1, 8, 8).flip(-1).reshape(seg.shape[0], -1)
-            else:
-                seg = seg.reshape(-1, kind[1], kind[2]).flip(-1).reshape(seg.shape[0], -1)
+            else:                                   # ("grid", nx, ny[, channels]): mirror y in every channel
+                ch = kind[3] if len(kind) > 3 else 1
+                seg = seg.reshape(-1, ch, kind[1], kind[2]).flip(-1).reshape(seg.shape[0], -1)
             parts.append(seg)
         return torch.cat(parts, dim=1)
     if tail.shape[1] % TOF_BLOCK != 0:

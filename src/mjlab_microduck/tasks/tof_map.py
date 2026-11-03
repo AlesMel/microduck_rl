@@ -52,9 +52,11 @@ class TofHeightMap:
         assert fuse in ("mean", "latest")
         self.fuse = fuse
         n = num_envs
-        self.grid = torch.full((n, self.nx, self.ny), float("nan"), device=device)
-        self.sum = torch.zeros((n, self.nx, self.ny), device=device)      # fuse="mean": per-cell running mean
-        self.cnt = torch.zeros((n, self.nx, self.ny), device=device)
+        if fuse == "latest":
+            self.grid = torch.full((n, self.nx, self.ny), float("nan"), device=device)
+        else:                                                            # per-cell running mean, gathered at query
+            self.sum = torch.zeros((n, self.nx, self.ny), device=device)
+            self.cnt = torch.zeros((n, self.nx, self.ny), device=device)
         self.anchor = torch.zeros(n, 3, device=device)          # odom pose at reset (x, y, z)
         self.anchor_yaw = torch.zeros(n, device=device)
         self.err = torch.zeros(n, 4, device=device)             # odometry error: dx, dy, dz, dyaw
@@ -68,9 +70,11 @@ class TofHeightMap:
     def reset(self, env_ids, pos_w: torch.Tensor, quat_w: torch.Tensor) -> None:
         k = len(env_ids) if not isinstance(env_ids, slice) else self.N
         dev = self.device
-        self.grid[env_ids] = float("nan")
-        self.sum[env_ids] = 0.0
-        self.cnt[env_ids] = 0.0
+        if self.fuse == "latest":
+            self.grid[env_ids] = float("nan")
+        else:
+            self.sum[env_ids] = 0.0
+            self.cnt[env_ids] = 0.0
         self.err[env_ids] = 0.0
         self.scale[env_ids] = (torch.rand(k, device=dev) * 2 - 1) * self.odom_scale
         self.yaw_rate[env_ids] = (torch.rand(k, device=dev) * 2 - 1) * self.odom_yaw
@@ -141,8 +145,6 @@ class TofHeightMap:
                 idx = (env[ok], ii[ok], jj[ok])
                 self.sum.index_put_(idx, h[ok], accumulate=True)
                 self.cnt.index_put_(idx, torch.ones_like(h[ok]), accumulate=True)
-        if self.fuse == "mean":
-            self.grid = torch.where(self.cnt > 0, self.sum / self.cnt.clamp(min=1), torch.full_like(self.sum, float("nan")))
         return new
 
     def scan(self, offsets_b: torch.Tensor, pos_w: torch.Tensor, quat_w: torch.Tensor,
@@ -156,8 +158,57 @@ class TofHeightMap:
                              torch.zeros_like(ox)], dim=-1)
         i, j, inside = self._est_to_cell(p_est)
         env = torch.arange(self.N, device=self.device)[:, None].expand_as(i)
-        h = self.grid[env, i.clamp(0, self.nx - 1), j.clamp(0, self.ny - 1)]
+        ic, jc = i.clamp(0, self.nx - 1), j.clamp(0, self.ny - 1)
+        if self.fuse == "latest":
+            h = self.grid[env, ic, jc]
+        else:
+            c = self.cnt[env, ic, jc]
+            h = torch.where(c > 0, self.sum[env, ic, jc] / c.clamp(min=1), torch.full_like(c, float("nan")))
         h = torch.where(inside, h, torch.full_like(h, float("nan")))
         z_rel = est_trunk[:, 2:3] - self.anchor[:, 2:3]
         values = z_rel - h - nominal
         return values, ~torch.isnan(values)
+
+
+class tof_map_scan:
+    """Observation term: the 19×7 scan read from a height map built ONLY from the head ToF and the
+    robot's drifting odometry (:class:`TofHeightMap`), followed by its known-mask:
+    ``[values (P), known (P)]``, unknown cells read 0 ("level with me") with known = 0.
+    The deployable counterpart of ``terrain_height_scan`` — same grid, same encoding, so a policy
+    trained on the oracle scan starts from where it was (run 10 warm-starts from run 8).
+    Params: the scan's ``x_range``, ``y_range``, ``res``, ``nominal``, ``clip``; ``sensor_name``;
+    ``map_kwargs`` for :class:`TofHeightMap`. ``mirror_layout`` tells symmetry.py how to mirror it."""
+
+    def __init__(self, cfg, env):
+        from mjlab_microduck.tasks.mdp import scan_grid
+        p = cfg.params
+        xs, ys = scan_grid(p["x_range"], p["y_range"], p["res"])
+        gx, gy = torch.meshgrid(torch.tensor(xs, device=env.device), torch.tensor(ys, device=env.device), indexing="ij")
+        self.offsets = torch.stack([gx.flatten(), gy.flatten()], dim=1)
+        self.nominal, self.clip = float(p["nominal"]), float(p["clip"])
+        self.sensor_name = p.get("sensor_name", "tof")
+        self.map = TofHeightMap(env.num_envs, env.device, **dict(p.get("map_kwargs", {})))
+        self.fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+        self.step_dt = float(env.step_dt)
+        self.mirror_layout = ("grid", len(xs), len(ys), 2)
+
+    def reset(self, env_ids=None):
+        # The pose of a reset env is only final after the reset events: re-anchor lazily.
+        self.fresh[slice(None) if env_ids is None else env_ids] = True
+
+    def __call__(self, env, **_):
+        robot = env.scene["robot"]
+        pos, quat = robot.data.root_link_pos_w, robot.data.root_link_quat_w
+        if bool(self.fresh.any()):
+            ids = torch.nonzero(self.fresh).flatten()
+            self.map.reset(ids, pos, quat)
+            # No frame on this first call after a reset: the sensor's hits may still be the
+            # pre-reset pose's. phase ≤ 0.4 + 0.3 per step → the first frame 2-4 steps later.
+            self.map.phase[ids] = torch.rand(len(ids), device=self.map.device) * 0.4
+            self.fresh[:] = False
+        self.map.advance_odometry(pos)
+        d = env.scene.sensors[self.sensor_name].data
+        self.map.integrate(d.pos_w, d.hit_pos_w[:, :64], d.distances[:, :64], pos, self.step_dt)
+        vals, known = self.map.scan(self.offsets, pos, quat, self.nominal)
+        vals = torch.where(known, vals, torch.zeros_like(vals)).clamp(-self.clip, self.clip)
+        return torch.cat([vals, known.float()], dim=1)

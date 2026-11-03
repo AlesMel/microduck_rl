@@ -199,3 +199,62 @@ def test_tof_clean_differs_from_the_oracle_only_in_perception(task):
     assert list(cfg.observations["actor"].terms)[-1] == "tof" and "height_scan" not in cfg.observations["actor"].terms
     assert cfg.rewards["head_pose_tracking"].weight == su.FREE_HEAD_TRACK_WEIGHT        # the free head of run 7b
     assert load_rl_cfg(task).run_name == "step_up_tof_clean"
+
+
+
+# ── run 10: the deployable map ──────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def tofmap_env():
+    from mjlab.envs import ManagerBasedRlEnv
+    cfg = load_env_cfg("Mjlab-StepUp-TofMap-Clean-MicroDuck", play=True)
+    cfg.scene.num_envs = 4
+    cfg.scene.terrain.terrain_generator.seed = 0
+    # Driven by constant actions, not a policy: a sagging HOME would trip fell_over and reset (and
+    # rightly clear) the maps mid-test. Only the time-out may end an episode here.
+    for name in [k for k in cfg.terminations if k != "time_out"]:
+        cfg.terminations.pop(name)
+    env = ManagerBasedRlEnv(cfg, device="cpu")
+    yield env
+    env.close()
+
+
+def test_tofmap_obs_is_values_then_mask_and_fills_in(tofmap_env):
+    obs, _ = tofmap_env.reset()
+    assert obs["actor"].shape[1] == 61 + 2 * 133
+    assert obs["critic"].shape[1] == 85 + 133            # = run 8's critic: it loads unpadded
+    # Head pitched down as the policies hold it (neck −, head +): with a level head the bottom ToF
+    # row lands 0.72 m ahead, beyond the scan (≤ 0.45 m), and the scan would rightly stay unknown.
+    action = torch.zeros(tofmap_env.num_envs, 14)
+    action[:, 5], action[:, 6] = -4.0, 4.0
+    with torch.no_grad():
+        for _ in range(40):                               # 0.8 s: ≈ 12 ToF frames
+            obs, *_ = tofmap_env.step(action)
+    vals, mask = obs["actor"][:, 61:194], obs["actor"][:, 194:]
+    assert set(mask.unique().tolist()) <= {0.0, 1.0}
+    assert torch.all(vals[mask == 0] == 0)                # unknown reads "level with me"
+    assert mask.mean() > 0.05                             # the map has filled in ahead of the robots
+    assert vals.abs().max() <= su.SCAN_PARAMS["clip"] + 1e-6
+
+
+def test_tofmap_mirror_flips_values_and_mask(tofmap_env):
+    obs, _ = tofmap_env.reset()
+    obs_perm, obs_sign, _, _ = symmetry._get_tensors(torch.device("cpu"))
+    layout = symmetry._actor_layout(tofmap_env)
+    assert layout == [(61, 266, ("grid", 19, 7, 2))]
+    a = obs["actor"]
+    m = symmetry.mirror_actor_obs(a, obs_perm, obs_sign, layout)
+    assert torch.equal(m[:, 61:].reshape(-1, 2, 19, 7), a[:, 61:].reshape(-1, 2, 19, 7).flip(-1))
+
+
+@pytest.mark.parametrize("task", ("Mjlab-StepUp-TofMap-Clean-MicroDuck", "Mjlab-StepUp-TofMap-Clean-Backlash-MicroDuck"))
+def test_tofmap_cfg(task):
+    cfg = load_env_cfg(task, play=False)
+    oracle = load_env_cfg(task.replace("TofMap-Clean", "Oracle-Clean"), play=False)
+    for k in ("height_progress", "foot_on_step", "foot_edge_contact", "fall", "trunk_impact"):
+        assert cfg.rewards[k].weight == oracle.rewards[k].weight
+    assert cfg.observations["actor"].terms["height_scan"].params["map_kwargs"] == su.TOF_MAP_KWARGS
+    assert cfg.observations["critic"].terms["height_scan_clean"].func is microduck_mdp.terrain_height_scan
+    assert any(getattr(s_, "name", "") == "tof" for s_ in cfg.scene.sensors)
+    assert "tof" not in cfg.observations["actor"].terms                # the frame reaches the actor only via the map
+    assert load_rl_cfg(task).run_name == "step_up_tofmap_clean"

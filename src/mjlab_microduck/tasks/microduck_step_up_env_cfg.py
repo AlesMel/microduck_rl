@@ -86,6 +86,7 @@ from mjlab.rl import RslRlOnPolicyRunnerCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks import tof
+from mjlab_microduck.tasks.tof_map import tof_map_scan
 from mjlab_microduck.tasks.microduck_walk_v2_terrain_env_cfg import (
     MicroduckWalkV2StairsFinetuneRlCfg,
     make_microduck_walk_v2_terrain_env_cfg,
@@ -126,6 +127,8 @@ EDGE_WEIGHT = -10.0              # per foot-second on a riser face / edge: the k
 EDGE_TOL = 0.005                 # m, height spread under a footprint that counts as "not one level"
 FALL_WEIGHT = -500.0             # −500·dt = −10 once per fall (≈ 20 % of an episode's return)
 MAX_EDGE_STEPS = 3               # foot-steps of edge contact per episode a promotion still allows
+# tof_map (run 10): the deployable map — built from the head ToF + drifting odometry, docs §14
+TOF_MAP_KWARGS = {"res": 0.02, "fuse": "mean", "splat": 1, "splat_y": 1, "max_range": 1.2}
 
 
 def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
@@ -134,8 +137,8 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
     around the feet, 61 + 133-D — perfect terrain memory, the bound on what a ToF-built height
     map could give). ``clean_feet``: price edge contact and falls, size the step-up stack in dt
     units, promote on the ladder only for clean episodes."""
-    if perception not in ("tof", "oracle"):
-        raise ValueError(f"perception must be 'tof' or 'oracle', not {perception!r}")
+    if perception not in ("tof", "oracle", "tof_map"):
+        raise ValueError(f"perception must be 'tof', 'oracle' or 'tof_map', not {perception!r}")
     cfg = make_microduck_walk_v2_terrain_env_cfg(
         play=play, menu="step_up", finetune=True, v2=True, apex=True, stairs_mode=True,
     )
@@ -148,10 +151,21 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
         cfg.observations["critic"].terms["tof_clean"] = ObservationTermCfg(
             func=tof.tof_depth, params={**TOF_PARAMS, "clean": True},
         )
-    else:
+    elif perception == "oracle":
         # Oracle: the exact terrain around and ahead of the feet (actor last → 61 + 133-D).
         cfg.observations["actor"].terms["height_scan"] = ObservationTermCfg(
             func=microduck_mdp.terrain_height_scan, params={**SCAN_PARAMS, "noise": SCAN_NOISE},
+        )
+        cfg.observations["critic"].terms["height_scan_clean"] = ObservationTermCfg(
+            func=microduck_mdp.terrain_height_scan, params={**SCAN_PARAMS, "noise": 0.0},
+        )
+    else:
+        # tof_map: the same scan, but read from a map the ToF built (values + known mask → 61 + 266-D).
+        # The critic keeps the exact scan: it never leaves the training box.
+        cfg.scene.sensors = tuple(cfg.scene.sensors) + (tof.make_tof_sensor_cfg(),)
+        cfg.observations["actor"].terms["height_scan"] = ObservationTermCfg(
+            func=tof_map_scan, params={**SCAN_PARAMS, "sensor_name": tof.TOF_SENSOR_NAME,
+                                       "map_kwargs": dict(TOF_MAP_KWARGS)},
         )
         cfg.observations["critic"].terms["height_scan_clean"] = ObservationTermCfg(
             func=microduck_mdp.terrain_height_scan, params={**SCAN_PARAMS, "noise": 0.0},
@@ -165,7 +179,7 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
     for attr in ("rel_standing_envs", "zero_command_prob", "rel_turn_in_place_envs"):
         if hasattr(tw, attr):
             setattr(tw, attr, 0.0)
-    if perception == "tof":
+    if perception in ("tof", "tof_map"):
         # "Look down" so the floor ahead is in the frame; the oracle keeps the gait's own head.
         n, h = HEAD_DOWN
         cfg.commands["head_pose"].ranges = (
@@ -226,3 +240,6 @@ MicroduckStepUpOracleRlCfg.run_name = "step_up_oracle_clean"
 
 MicroduckStepUpTofCleanRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
 MicroduckStepUpTofCleanRlCfg.run_name = "step_up_tof_clean"
+
+MicroduckStepUpTofMapCleanRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpTofMapCleanRlCfg.run_name = "step_up_tofmap_clean"
