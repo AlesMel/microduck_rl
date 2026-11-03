@@ -120,3 +120,32 @@ tracking (run 7b, `Mjlab-StepUp-Tof-FreeHead-MicroDuck`: weight 2.0 → 0.5, std
 gave 64/86 on top with 14 falls — 3.1 cm single steps 13/15, 3.7 cm 8/13, 11 cm flights 6/12.
 Blind baselines stay at 5–18/86 for every run. Run 7b's model_5999 is the policy to publish
 once the runtime side is merged. Details in the env cfg docstring.
+
+## 10. Why it stumbles (2026-11-03, `scripts/eval/step_up_failures.py`, run 7b model_5999)
+
+"64/86 on top" hid the real behaviour. Per robot, with the feet's collision boxes, the contact
+force (global frame) and the ToF hit points recorded at 50 Hz, 96 robots, 12 s:
+
+| vx (m/s) | on top / fell / stalled | clean climbs (no toe catch, no edge landing) | top without a HARD catch (\|Fx\| > 0.5 Fz) | falls preceded by a toe catch |
+| --- | --- | --- | --- | --- |
+| 0.25 | 68 / 14 / 4 | 1 / 86 | 15 / 68 | 9 / 14 |
+| 0.15 | 46 / 19 / 21 | 1 / 86 | 7 / 46 | 12 / 19 |
+| 0.10 | 13 / 7 / 66 | 0 / 86 | 0 / 13 | 6 / 7 |
+
+- **The policy climbs by kicking the riser.** A climb has a median of 3 toe catches (1 hard); the
+  riser is the step detector. Falls happen just past the edge (trunk 7 cm over it, median).
+- **It cannot see the step when it matters.** The visible ground starts ≈ 20 cm ahead of the
+  toes (beam 23° below level, bottom row 43°, the sensor 0.24 m up, 0.12 m minimum range), so the
+  riser leaves the frame 1.3 s / 24 cm before the first foot reaches it. The actor is a
+  feed-forward MLP: for the last ~3 steps it has no record of where the step is. Contact is the
+  only information left, and it uses it.
+- **It does not slow down** (0.23 → 0.21 m/s over the last 0.6 m): `track_vx_ema` pays constant
+  speed through the step, and nothing prices a toe catch or a fall (no termination penalty;
+  a fall only forfeits future reward, and the survival ladder keeps robots where ~half fail).
+- **Slower is worse with this gait**: the swing apex scales with speed (stairs FEASIBILITY), so at
+  0.1 m/s the feet do not clear the riser and the robots stall in front of it.
+
+Consequences for the design: the missing piece is MEMORY of the terrain between seeing it and
+stepping on it (recurrent actor, or a body-frame height map built from ToF + odometry — the
+runtime's `kinematics::tof::Reprojector` already gives points in the trunk frame), then an
+objective that prices stumbles and falls, and a success metric that counts clean climbs only.
