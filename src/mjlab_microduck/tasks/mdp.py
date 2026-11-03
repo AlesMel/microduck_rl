@@ -3752,7 +3752,7 @@ def terrain_levels_first_reset_guarded(
 def terrain_levels_survival(
     env, env_ids: "torch.Tensor", min_tracking: float = 0.55, reward_name: str = "track_linear_velocity",
     min_progress: float = 0.0, command_name: str = "twist", still_threshold: float = 0.05,
-    demote_no_progress: bool = False,
+    demote_no_progress: bool = False, max_edge_steps: float | None = None,
 ) -> dict:
     """Terrain ladder promoted on how the episode went, not on metres from the spawn.
 
@@ -3794,6 +3794,11 @@ def terrain_levels_survival(
         needed = min_progress * v_cmd * float(env.max_episode_length_s)
         progressed = (moved >= needed) | (v_cmd < still_threshold)
         move_up = move_up & progressed
+    edge_steps = getattr(env, "_foot_edge_steps", None)
+    if max_edge_steps is not None and edge_steps is not None:
+        # Clean-stepping gate: a robot that reached the time-out by kicking the riser or landing
+        # on edges is NOT promoted — the ladder must not train at heights it only manages dirty.
+        move_up = move_up & (edge_steps[env_ids] <= max_edge_steps)
     move_down = fell & (~move_up)
     if progressed is not None and demote_no_progress:
         move_down = move_down | (timed_out & (~fell) & (~progressed))
@@ -8611,3 +8616,154 @@ class foot_on_step_bonus:
         ids = slice(None) if env_ids is None else env_ids
         self.paid[ids] = False
         self.was_low[ids] = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Clean stepping — terrain height field, oracle height scan, foot-edge contact cost
+# (docs/step_up_perception.md §10-11: run 7b climbed by kicking the riser)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TerrainHeightField:
+    """Exact ground height on a regular world-xy grid, rasterised once from the terrain's BOX geoms
+    (every tile of the step-up / stairs menus is boxes). ``heights(xy)`` is a pure lookup, so
+    privileged rewards and the oracle scan cost nothing per step. Off the grid → ``default``."""
+
+    def __init__(self, x0: float, y0: float, res: float, grid: "torch.Tensor", default: float = 0.0):
+        self.x0, self.y0, self.res, self.grid, self.default = x0, y0, res, grid, default
+        self.nx, self.ny = grid.shape
+
+    @classmethod
+    def from_model(cls, mj_model, device, res: float = 0.01, margin: float = 0.5) -> "TerrainHeightField":
+        import mujoco as _mj
+        import numpy as _np
+        data = _mj.MjData(mj_model)
+        _mj.mj_forward(mj_model, data)
+        boxes = []
+        for g in range(mj_model.ngeom):
+            body = _mj.mj_id2name(mj_model, _mj.mjtObj.mjOBJ_BODY, mj_model.geom_bodyid[g]) or ""
+            if "terrain" not in body or mj_model.geom_type[g] != _mj.mjtGeom.mjGEOM_BOX:
+                continue
+            R = data.geom_xmat[g].reshape(3, 3)
+            if not _np.allclose(_np.abs(R), _np.eye(3), atol=1e-6):
+                continue                       # rotated boxes do not occur in the box menus
+            c, s = data.geom_xpos[g], mj_model.geom_size[g]
+            boxes.append((c[0] - s[0], c[0] + s[0], c[1] - s[1], c[1] + s[1], c[2] + s[2]))
+        assert boxes, "TerrainHeightField: no terrain boxes in the model"
+        b = _np.array(boxes)
+        x0, x1 = b[:, 0].min() - margin, b[:, 1].max() + margin
+        y0, y1 = b[:, 2].min() - margin, b[:, 3].max() + margin
+        nx, ny = int(math.ceil((x1 - x0) / res)) + 1, int(math.ceil((y1 - y0) / res)) + 1
+        grid = _np.full((nx, ny), -1e3, dtype=_np.float32)
+        for bx0, bx1, by0, by1, top in boxes:
+            i0, i1 = int(math.ceil((bx0 - x0) / res - 1e-6)), int(math.floor((bx1 - x0) / res + 1e-6))
+            j0, j1 = int(math.ceil((by0 - y0) / res - 1e-6)), int(math.floor((by1 - y0) / res + 1e-6))
+            sub = grid[i0:i1 + 1, j0:j1 + 1]
+            _np.maximum(sub, top, out=sub)
+        grid[grid < -1e2] = 0.0
+        return cls(float(x0), float(y0), res, torch.as_tensor(grid, device=device))
+
+    def heights(self, xy: "torch.Tensor") -> "torch.Tensor":
+        i = torch.round((xy[..., 0] - self.x0) / self.res).long()
+        j = torch.round((xy[..., 1] - self.y0) / self.res).long()
+        inside = (i >= 0) & (i < self.nx) & (j >= 0) & (j < self.ny)
+        h = self.grid[i.clamp(0, self.nx - 1), j.clamp(0, self.ny - 1)]
+        return torch.where(inside, h, torch.full_like(h, self.default))
+
+
+def terrain_height_field(env) -> TerrainHeightField:
+    hf = getattr(env, "_terrain_hf", None)
+    if hf is None:
+        hf = TerrainHeightField.from_model(env.sim.mj_model, env.device)
+        env._terrain_hf = hf
+    return hf
+
+
+def scan_grid(x_range: tuple, y_range: tuple, res: float) -> tuple[list[float], list[float]]:
+    """Grid coordinates of the oracle scan, x forward and y left in the trunk's yaw frame.
+    Flattened x-major: index = ix * len(ys) + iy (symmetry.py mirrors iy)."""
+    nx = int(round((x_range[1] - x_range[0]) / res)) + 1
+    ny = int(round((y_range[1] - y_range[0]) / res)) + 1
+    return [x_range[0] + k * res for k in range(nx)], [y_range[0] + k * res for k in range(ny)]
+
+
+def terrain_height_scan(env, x_range: tuple = (-0.09, 0.45), y_range: tuple = (-0.09, 0.09),
+                        res: float = 0.03, nominal: float = 0.115, clip: float = 0.2, noise: float = 0.0,
+                        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> "torch.Tensor":
+    """ORACLE observation: terrain height around and ahead of the feet, from the exact height
+    field, as ``trunk_z − h − nominal`` (0 on flat ground under a standing robot, −0.04 where a
+    4 cm step starts) on a grid in the trunk's yaw frame. This is the layout a body-frame height
+    map built from the ToF + odometry would have on the robot; here it is perfect memory — the
+    experiment that says whether terrain information is the bottleneck (step_up oracle task)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    hf = terrain_height_field(env)
+    xs, ys = scan_grid(x_range, y_range, res)
+    key = (tuple(xs), tuple(ys))
+    cache = getattr(env, "_scan_offsets", {})
+    if key not in cache:
+        gx, gy = torch.meshgrid(torch.tensor(xs, device=env.device), torch.tensor(ys, device=env.device), indexing="ij")
+        cache[key] = torch.stack([gx.flatten(), gy.flatten()], dim=1)          # (P, 2)
+        env._scan_offsets = cache
+    off = cache[key]
+    pos = asset.data.root_link_pos_w
+    q = asset.data.root_link_quat_w
+    yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+    c, s = torch.cos(yaw)[:, None], torch.sin(yaw)[:, None]
+    wx = pos[:, 0:1] + c * off[None, :, 0] - s * off[None, :, 1]
+    wy = pos[:, 1:2] + s * off[None, :, 0] + c * off[None, :, 1]
+    h = hf.heights(torch.stack([wx, wy], dim=-1))
+    out = pos[:, 2:3] - h - nominal
+    if noise > 0:
+        out = out + (torch.rand_like(out) * 2 - 1) * noise
+    return torch.nan_to_num(out, nan=0.0).clamp(-clip, clip)
+
+
+def foot_edge_flags(hf: TerrainHeightField, corners_w: "torch.Tensor", found: "torch.Tensor",
+                    tol: float = 0.005) -> "torch.Tensor":
+    """(B, F) bool: a foot is in contact while the ground under its footprint is NOT one level —
+    the toe against a riser face, or the sole straddling an edge. ``corners_w`` (B, F, K, 3) are
+    the world corners of each foot's collision box; their xy (plus the centre) are looked up."""
+    xy = corners_w[..., :2]
+    xy = torch.cat([xy, xy.mean(dim=2, keepdim=True)], dim=2)
+    h = hf.heights(xy)                                                        # (B, F, K+1)
+    spread = h.amax(dim=2) - h.amin(dim=2)
+    return found & (spread > tol)
+
+
+class foot_edge_contact_cost:
+    """Cost: number of feet (0-2) in contact with ground that is not level under the footprint
+    (see :func:`foot_edge_flags`) — what a person never does on a stair: kick the riser, land
+    half on the edge. ≥ 0 → NEGATIVE weight. Exact geometry (privileged: the box terrain's height
+    field and the feet's collision boxes), so it is a training signal, not an observation.
+    Keeps ``env._foot_edge_steps`` (per-env count this episode) for the survival ladder's
+    ``max_edge_steps`` gate."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        mjm = env.sim.mj_model
+        names = cfg.params.get("foot_geoms", ("robot/left_foot_collision", "robot/right_foot_collision"))
+        self.gid = [mjm.geom(n).id for n in names]
+        aabb = torch.as_tensor(mjm.geom_aabb[self.gid], dtype=torch.float32, device=env.device)   # (F, 6)
+        signs = torch.tensor([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
+                             dtype=torch.float32, device=env.device)
+        self.local = aabb[:, None, :3] + signs[None] * aabb[:, None, 3:]                         # (F, 8, 3)
+        env._foot_edge_steps = torch.zeros(env.num_envs, device=env.device)
+        self._env_counter = lambda: env._foot_edge_steps
+
+    def corners(self, env) -> "torch.Tensor":
+        xpos = env.sim.data.geom_xpos[:, self.gid]
+        xmat = env.sim.data.geom_xmat[:, self.gid].reshape(-1, len(self.gid), 3, 3)
+        return xpos[:, :, None, :] + torch.einsum("bfij,fkj->bfki", xmat, self.local)
+
+    def __call__(self, env: ManagerBasedRlEnv, sensor_name: str, tol: float = 0.005,
+                 foot_geoms: tuple = ("robot/left_foot_collision", "robot/right_foot_collision")) -> torch.Tensor:
+        del foot_geoms  # consumed at init
+        found = env.scene[sensor_name].data.found[:, : len(self.gid)] > 0
+        flags = foot_edge_flags(terrain_height_field(env), self.corners(env), found, tol)
+        n = flags.float().sum(dim=1)
+        env._foot_edge_steps += n
+        return n
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        # The env resets the curriculum (the ladder reads the count) BEFORE the reward manager,
+        # so clearing here never hides an episode from the gate.
+        env_ids = slice(None) if env_ids is None else env_ids
+        self._env_counter()[env_ids] = 0.0

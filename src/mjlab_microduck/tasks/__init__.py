@@ -56,6 +56,7 @@ from .microduck_ground_pick_env_cfg import (
 )
 from .microduck_step_up_env_cfg import (
     MicroduckStepUpFreeHeadRlCfg,
+    MicroduckStepUpOracleRlCfg,
     MicroduckStepUpRlCfg,
     make_microduck_step_up_env_cfg,
 )
@@ -218,6 +219,16 @@ register_mjlab_task(
     env_cfg=make_microduck_step_up_env_cfg(),
     play_env_cfg=make_microduck_step_up_env_cfg(play=True),
     rl_cfg=MicroduckStepUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StepUp-Oracle-Clean — exact height scan around the feet + clean-stepping objective (run 8):
+# bounds what perfect terrain memory could give before a ToF height map is built.
+register_mjlab_task(
+    task_id="Mjlab-StepUp-Oracle-Clean-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(perception="oracle", clean_feet=True),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True, perception="oracle", clean_feet=True),
+    rl_cfg=MicroduckStepUpOracleRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
@@ -388,6 +399,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-WalkV2-StairsModeHR-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True, "headroom_weight": MODE_HEADROOM_WEIGHT_HR}, MicroduckWalkV2StairsModeHRRlCfg, _BL_WALK),
     ("Mjlab-StepUp-Tof-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {}, MicroduckStepUpRlCfg, _BL_WALK),
     ("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True}, MicroduckStepUpFreeHeadRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"perception": "oracle", "clean_feet": True}, MicroduckStepUpOracleRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),

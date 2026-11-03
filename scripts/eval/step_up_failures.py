@@ -58,12 +58,12 @@ def _risers(mjm: mujoco.MjModel, origin: np.ndarray) -> list[tuple[float, float]
     return sorted(out.items())
 
 
-def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: int) -> dict:
-    env = build_env(TASK, n, seed, device, fixed_heading=False)
+def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: int, task: str = TASK) -> dict:
+    env = build_env(task, n, seed, device, fixed_heading=False)
     policy = WalkPolicy(checkpoint, vx, 0.0, 0.0, onnx=False, device=device)
     mjm = env.sim.mj_model
     robot = env.scene["robot"]
-    sensor = env.scene.sensors[tof.TOF_SENSOR_NAME]
+    sensor = env.scene.sensors.get(tof.TOF_SENSOR_NAME)       # None on the oracle task (no ToF)
     contact = env.scene.sensors["feet_ground_contact"]
     names, types, levels, _ = _terrain_layout(env)
     origins = env.scene.env_origins.cpu().numpy()
@@ -90,11 +90,15 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
             rec["sole"].append(corners[..., 2].amin(-1).cpu().numpy())
             rec["found"].append((contact.data.found[:, :2] > 0).cpu().numpy())
             rec["force"].append(contact.data.force[:, :2].cpu().numpy())
-            d = sensor.data.distances[:, :64]
-            hx = sensor.data.hit_pos_w[:, :64, 0]
-            visible = (d >= tof.RANGE_MIN_M) & (d <= VIEW_M)
-            rec["near"].append(torch.where(visible, hx, torch.full_like(hx, 1e9)).amin(1).cpu().numpy())
-            rec["far"].append(torch.where(visible, hx, torch.full_like(hx, -1e9)).amax(1).cpu().numpy())
+            if sensor is not None:
+                d = sensor.data.distances[:, :64]
+                hx = sensor.data.hit_pos_w[:, :64, 0]
+                visible = (d >= tof.RANGE_MIN_M) & (d <= VIEW_M)
+                rec["near"].append(torch.where(visible, hx, torch.full_like(hx, 1e9)).amin(1).cpu().numpy())
+                rec["far"].append(torch.where(visible, hx, torch.full_like(hx, -1e9)).amax(1).cpu().numpy())
+            else:
+                rec["near"].append(np.full(n, 1e9))
+                rec["far"].append(np.full(n, -1e9))
             rec["tx"].append(robot.data.root_link_pos_w[:, 0].cpu().numpy())
             rec["tz"].append((robot.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]).cpu().numpy())
             rec["vx"].append(robot.data.root_link_lin_vel_b[:, 0].cpu().numpy())
@@ -210,9 +214,10 @@ def main() -> None:
     p.add_argument("--seconds", type=float, default=8.0)
     p.add_argument("--vx", type=float, nargs="+", default=[0.25])
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--task", default=TASK)
     p.add_argument("--json", default=None)
     a = p.parse_args()
-    out = [run(a.checkpoint, a.device, a.num_envs, a.seconds, v, a.seed) for v in a.vx]
+    out = [run(a.checkpoint, a.device, a.num_envs, a.seconds, v, a.seed, a.task) for v in a.vx]
     if a.json:
         Path(a.json).write_text(json.dumps(out, indent=1, default=float))
         print("json →", a.json)

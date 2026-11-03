@@ -34,13 +34,15 @@ def set_blind(env, blind: bool) -> None:
 
 
 def grid_of(env, i: int) -> np.ndarray:
+    if tof.TOF_SENSOR_NAME not in env.scene.sensors:
+        return np.full((8, 8), np.nan)
     d = env.scene.sensors[tof.TOF_SENSOR_NAME].data.distances[i, :64].cpu().numpy()
     return np.where(d < 0, np.nan, d).reshape(8, 8)
 
 
 def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: int, blind: bool,
-        snapshots: bool) -> dict:
-    env = build_env(TASK, n, seed, device, fixed_heading=False)
+        snapshots: bool, task: str = TASK) -> dict:
+    env = build_env(task, n, seed, device, fixed_heading=False)
     policy = WalkPolicy(checkpoint, vx, 0.0, 0.0, onnx=False, device=device)
     set_blind(env, blind)
     robot = env.scene["robot"]
@@ -126,11 +128,12 @@ def main() -> None:
     p.add_argument("--seconds", type=float, default=8.0)
     p.add_argument("--vx", type=float, default=0.25)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--task", default=TASK)
     p.add_argument("--blind", action="store_true")
     p.add_argument("--snapshots", action="store_true", help="print the ToF grid of one single_step robot over time")
     p.add_argument("--json", default=None)
     a = p.parse_args()
-    out = run(a.checkpoint, a.device, a.num_envs, a.seconds, a.vx, a.seed, a.blind, a.snapshots)
+    out = run(a.checkpoint, a.device, a.num_envs, a.seconds, a.vx, a.seed, a.blind, a.snapshots, a.task)
     if a.json:
         Path(a.json).write_text(json.dumps(out, indent=1))
         print("json →", a.json)

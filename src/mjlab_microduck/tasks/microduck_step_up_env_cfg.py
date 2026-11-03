@@ -79,6 +79,7 @@ GPU, eval = step_up_eval.py, 96 robots, 8 s, vx 0.25, same seed; run 6 re-evalua
 """
 from copy import deepcopy
 
+from mjlab.envs.mdp.rewards import is_terminated as mjlab_is_terminated
 from mjlab.managers import ObservationTermCfg, RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg
@@ -112,19 +113,49 @@ IMPACT_WEIGHT = 0.02             # trunk_vertical_accel_penalty is SELF-NEGATING
                                  # (the smoke test caught −0.02 paying +0.025/step for impacts)
 TOF_PARAMS = {"sensor_name": tof.TOF_SENSOR_NAME}
 
+# ── oracle + clean stepping (run 8, docs/step_up_perception.md §10-11) ─────
+# Rewards are scaled by dt in mjlab (weight = per-second rate). The step-up stack above was sized
+# as if it were not: height_progress paid 100·Δz·dt ≈ 0.07 for a 3.7 cm climb and foot_on_step
+# 0.1 per foot, against an episode return of ≈ 52 — runs 6-7b climbed for velocity tracking and
+# the ladder, not for the step. The clean variant sizes everything in dt units:
+SCAN_PARAMS = {"x_range": (-0.09, 0.45), "y_range": (-0.09, 0.09), "res": 0.03, "nominal": 0.115, "clip": 0.2}
+SCAN_NOISE = 0.005               # m, uniform, actor only (the critic sees the exact field)
+CLEAN_PROGRESS_WEIGHT = 5000.0   # 5000·dt = 100 per metre of rise → 1.0 per cm, paid back on the way down
+CLEAN_FOOT_ON_STEP_WEIGHT = 100.0   # 100·dt = 2 per foot, once
+EDGE_WEIGHT = -10.0              # per foot-second on a riser face / edge: the kicking climb (≈ 0.3-0.5 s) costs 3-5
+EDGE_TOL = 0.005                 # m, height spread under a footprint that counts as "not one level"
+FALL_WEIGHT = -500.0             # −500·dt = −10 once per fall (≈ 20 % of an episode's return)
+MAX_EDGE_STEPS = 3               # foot-steps of edge contact per episode a promotion still allows
 
-def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False):
+
+def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
+                                   perception: str = "tof", clean_feet: bool = False):
+    """``perception``: "tof" (the head sensor, 125-D actor) or "oracle" (an exact height scan
+    around the feet, 61 + 133-D — perfect terrain memory, the bound on what a ToF-built height
+    map could give). ``clean_feet``: price edge contact and falls, size the step-up stack in dt
+    units, promote on the ladder only for clean episodes."""
+    if perception not in ("tof", "oracle"):
+        raise ValueError(f"perception must be 'tof' or 'oracle', not {perception!r}")
     cfg = make_microduck_walk_v2_terrain_env_cfg(
         play=play, menu="step_up", finetune=True, v2=True, apex=True, stairs_mode=True,
     )
     cfg.episode_length_s = EPISODE_LENGTH_S
 
-    # Perception: the ToF in the scene, the frame in both obs groups (actor last → 125-D).
-    cfg.scene.sensors = tuple(cfg.scene.sensors) + (tof.make_tof_sensor_cfg(),)
-    cfg.observations["actor"].terms["tof"] = ObservationTermCfg(func=tof.tof_depth, params=dict(TOF_PARAMS))
-    cfg.observations["critic"].terms["tof_clean"] = ObservationTermCfg(
-        func=tof.tof_depth, params={**TOF_PARAMS, "clean": True},
-    )
+    if perception == "tof":
+        # The ToF in the scene, the frame in both obs groups (actor last → 125-D).
+        cfg.scene.sensors = tuple(cfg.scene.sensors) + (tof.make_tof_sensor_cfg(),)
+        cfg.observations["actor"].terms["tof"] = ObservationTermCfg(func=tof.tof_depth, params=dict(TOF_PARAMS))
+        cfg.observations["critic"].terms["tof_clean"] = ObservationTermCfg(
+            func=tof.tof_depth, params={**TOF_PARAMS, "clean": True},
+        )
+    else:
+        # Oracle: the exact terrain around and ahead of the feet (actor last → 61 + 133-D).
+        cfg.observations["actor"].terms["height_scan"] = ObservationTermCfg(
+            func=microduck_mdp.terrain_height_scan, params={**SCAN_PARAMS, "noise": SCAN_NOISE},
+        )
+        cfg.observations["critic"].terms["height_scan_clean"] = ObservationTermCfg(
+            func=microduck_mdp.terrain_height_scan, params={**SCAN_PARAMS, "noise": 0.0},
+        )
 
     # Commands: forward into the step; the head slot says "look down".
     tw = cfg.commands["twist"]
@@ -134,18 +165,20 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False):
     for attr in ("rel_standing_envs", "zero_command_prob", "rel_turn_in_place_envs"):
         if hasattr(tw, attr):
             setattr(tw, attr, 0.0)
-    n, h = HEAD_DOWN
-    cfg.commands["head_pose"].ranges = (
-        (n - HEAD_JITTER, n + HEAD_JITTER),
-        (h - HEAD_JITTER, h + HEAD_JITTER),
-        (-0.07, 0.07),
-        (-0.015, 0.015),
-    )
-    cfg.rewards["head_pose_tracking"].params["std"] = HEAD_TRACK_STD
-    if free_head:
-        cfg.rewards["head_pose_tracking"].weight = FREE_HEAD_TRACK_WEIGHT
-        cfg.rewards["head_pose_tracking"].params["std"] = FREE_HEAD_TRACK_STD
-    cfg.curriculum.pop("head_pose_range", None)       # the inherited widening would undo the offset
+    if perception == "tof":
+        # "Look down" so the floor ahead is in the frame; the oracle keeps the gait's own head.
+        n, h = HEAD_DOWN
+        cfg.commands["head_pose"].ranges = (
+            (n - HEAD_JITTER, n + HEAD_JITTER),
+            (h - HEAD_JITTER, h + HEAD_JITTER),
+            (-0.07, 0.07),
+            (-0.015, 0.015),
+        )
+        cfg.rewards["head_pose_tracking"].params["std"] = HEAD_TRACK_STD
+        if free_head:
+            cfg.rewards["head_pose_tracking"].weight = FREE_HEAD_TRACK_WEIGHT
+            cfg.rewards["head_pose_tracking"].params["std"] = FREE_HEAD_TRACK_STD
+        cfg.curriculum.pop("head_pose_range", None)   # the inherited widening would undo the offset
 
     # Spawn facing the step (reset_root_on_terrain is already wired by v2).
     if not play:
@@ -168,6 +201,16 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False):
     cfg.rewards["trunk_impact"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty, weight=IMPACT_WEIGHT, params={},
     )
+    if clean_feet:
+        cfg.rewards["height_progress"].weight = CLEAN_PROGRESS_WEIGHT
+        cfg.rewards["foot_on_step"].weight = CLEAN_FOOT_ON_STEP_WEIGHT
+        cfg.rewards["foot_edge_contact"] = RewardTermCfg(
+            func=microduck_mdp.foot_edge_contact_cost, weight=EDGE_WEIGHT,
+            params={"sensor_name": contact_sensor, "tol": EDGE_TOL},
+        )
+        cfg.rewards["fall"] = RewardTermCfg(func=mjlab_is_terminated, weight=FALL_WEIGHT, params={})
+        if not play:
+            cfg.curriculum["terrain_levels"].params["max_edge_steps"] = MAX_EDGE_STEPS
     return cfg
 
 
@@ -177,3 +220,6 @@ MicroduckStepUpRlCfg.run_name = "step_up_tof"
 
 MicroduckStepUpFreeHeadRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
 MicroduckStepUpFreeHeadRlCfg.run_name = "step_up_tof_freehead"
+
+MicroduckStepUpOracleRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpOracleRlCfg.run_name = "step_up_oracle_clean"
