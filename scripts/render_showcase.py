@@ -1,14 +1,21 @@
-"""Showcase video of the ToF step-up policy: the hero robot in colour with its ToF beams and hit
-points drawn from the head, every other robot of the batch grey and translucent, an 8×8 inset of
-the frame the policy actually receives, a HUD, and a slow camera orbit.
+"""Showcase video of a step-up policy: the hero robot in colour with what it perceives, every other
+robot of the batch grey and translucent, an inset of the perception input as the policy receives
+it, the feet marked at every contact (green = on one level, red = on an edge / against a riser),
+a HUD with the running count of edge contacts, and a slow camera orbit.
+
+Two perception modes, picked from the task's actor observation:
+  ToF      the head sensor's 64 beams and hit points; inset = the 8×8 frame
+  scan     the oracle height map's 133 points on the ground; inset = the 19×7 grid (forward = up)
 
     # on the GPU box (records the rollout, then renders offscreen with EGL):
     MUJOCO_GL=egl uv run python scripts/render_showcase.py record --checkpoint <run>/model_2999.pt \\
         --device cuda --num-envs 32 --seconds 8 --out showcase.npz
     MUJOCO_GL=egl uv run python scripts/render_showcase.py render --states showcase.npz --video showcase.mp4
+    # the oracle: add --task Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck to BOTH commands
 
 Heroes: for each step tile (single_step, short_flight) the robot on the highest row that ended on
-top of its step, earliest first; one segment per hero, concatenated.
+top of its step — a clean one (no edge contact) if there is one, else the earliest; one segment
+per hero, concatenated. The HUD shows the hero's edge contacts, so a dirty climb is visible.
 """
 from __future__ import annotations
 
@@ -21,7 +28,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+from types import SimpleNamespace  # noqa: E402
+
 from view_terrain_env import WalkPolicy, _terrain_layout, build_env  # noqa: E402
+from mjlab_microduck.tasks import mdp as microduck_mdp  # noqa: E402
 from mjlab_microduck.tasks import tof  # noqa: E402
 
 TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"
@@ -31,11 +41,38 @@ FPS = 25
 
 # ── record ───────────────────────────────────────────────────────────────────
 
+def _scan_points_w(env, params: dict) -> torch.Tensor:
+    """World (x, y, terrain z) of every oracle-scan point, in the obs order."""
+    robot = env.scene["robot"]
+    hf = microduck_mdp.terrain_height_field(env)
+    xs, ys = microduck_mdp.scan_grid(params["x_range"], params["y_range"], params["res"])
+    gx, gy = torch.meshgrid(torch.tensor(xs, device=env.device), torch.tensor(ys, device=env.device), indexing="ij")
+    off = torch.stack([gx.flatten(), gy.flatten()], dim=1)
+    pos, q = robot.data.root_link_pos_w, robot.data.root_link_quat_w
+    yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+    c, s_ = torch.cos(yaw)[:, None], torch.sin(yaw)[:, None]
+    wx = pos[:, 0:1] + c * off[None, :, 0] - s_ * off[None, :, 1]
+    wy = pos[:, 1:2] + s_ * off[None, :, 0] + c * off[None, :, 1]
+    xy = torch.stack([wx, wy], dim=-1)
+    return torch.cat([xy, hf.heights(xy)[..., None]], dim=-1)
+
+
 def record(a) -> None:
-    env = build_env(TASK, a.num_envs, a.seed, a.device, fixed_heading=False)
+    env = build_env(a.task, a.num_envs, a.seed, a.device, fixed_heading=False)
     policy = WalkPolicy(a.checkpoint, a.vx, 0.0, 0.0, onnx=False, device=a.device)
     robot = env.scene["robot"]
-    sensor = env.scene.sensors[tof.TOF_SENSOR_NAME]
+    sensor = env.scene.sensors.get(tof.TOF_SENSOR_NAME)
+    om = env.observation_manager
+    actor_names = list(om._group_obs_term_names["actor"])
+    mode = "tof" if sensor is not None else "scan"
+    scan_params = None
+    if mode == "scan":
+        assert actor_names[-1] == "height_scan", f"{a.task}: neither a ToF nor an oracle-scan task"
+        scan_params = dict(om._group_obs_term_cfgs["actor"][-1].params)
+    width = 64 if mode == "tof" else len(microduck_mdp.scan_grid(scan_params["x_range"], scan_params["y_range"], scan_params["res"])[0]) * \
+        len(microduck_mdp.scan_grid(scan_params["x_range"], scan_params["y_range"], scan_params["res"])[1])
+    feet = microduck_mdp.foot_edge_contact_cost(SimpleNamespace(params={}), env)      # corners only
+    contact = env.scene.sensors["feet_ground_contact"]
     names, types, levels, _ = _terrain_layout(env)
     gen = env.scene.terrain.cfg.terrain_generator
     nq = env.sim.mj_model.nq
@@ -43,19 +80,32 @@ def record(a) -> None:
     obs, _ = env.reset()
     origins = env.scene.env_origins.cpu().numpy()
     z0 = (robot.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]).cpu().numpy()
-    qpos, hits, dists, spos, frames_in, rise, fallen = [], [], [], [], [], [], []
+    qpos, hits, dists, spos, frames_in, rise, fallen, foot_pos, foot_found, foot_edge = ([] for _ in range(10))
     fell = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    edge_count = torch.zeros(env.num_envs, device=env.device)
+    hf = microduck_mdp.terrain_height_field(env)
     with torch.no_grad():
         for k in range(round(a.seconds / env.step_dt)):
+            corners = feet.corners(env)                                               # (B, 2, 8, 3)
+            found = contact.data.found[:, :2] > 0
+            edge = microduck_mdp.foot_edge_flags(hf, corners, found)
+            edge_count += (edge & ~fell[:, None]).float().sum(dim=1)
             if k % stride == 0:
                 qpos.append(env.sim.data.qpos.cpu().numpy().reshape(-1, nq).copy())
-                d = sensor.data
-                hits.append(d.hit_pos_w[:, :64].cpu().numpy().copy())
-                dists.append(d.distances[:, :64].cpu().numpy().copy())
-                spos.append(d.pos_w.cpu().numpy().copy())
-                frames_in.append(obs["actor"][:, -64:].cpu().numpy().copy())
+                if mode == "tof":
+                    d = sensor.data
+                    hits.append(d.hit_pos_w[:, :64].cpu().numpy().copy())
+                    dists.append(d.distances[:, :64].cpu().numpy().copy())
+                    spos.append(d.pos_w.cpu().numpy().copy())
+                else:
+                    hits.append(_scan_points_w(env, scan_params).cpu().numpy())
+                frames_in.append(obs["actor"][:, -width:].cpu().numpy().copy())
                 rise.append((robot.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]).cpu().numpy() - z0)
                 fallen.append(fell.cpu().numpy().copy())
+                sole = torch.stack([corners[..., 0].mean(-1), corners[..., 1].mean(-1), corners[..., 2].amin(-1)], dim=-1)
+                foot_pos.append(sole.cpu().numpy())
+                foot_found.append(found.cpu().numpy())
+                foot_edge.append(edge_count.cpu().numpy().copy())
             obs, _, term, _, _ = env.step(policy(obs))
             fell |= term.bool()
     rise = np.stack(rise)
@@ -73,14 +123,22 @@ def record(a) -> None:
                 continue
             top = np.nonzero(rise[:, i] >= 0.8 * riser[i])[0]
             if len(top) and rise[-FPS:, i].mean() >= 0.8 * riser[i]:
-                cand.append((-int(levels[i]), int(top[0]), i))
+                dirty = int(edge_count[i].item() > 0)
+                cand.append((-int(levels[i]), dirty, int(top[0]), i))
         if cand:
-            heroes.append(int(sorted(cand)[0][2]))
-    print("heroes:", [(h, names[types[h]], int(levels[h]), f"riser {100 * riser[h]:.1f} cm") for h in heroes])
-    np.savez_compressed(a.out, qpos=np.stack(qpos), hits=np.stack(hits), dists=np.stack(dists), spos=np.stack(spos),
+            heroes.append(int(sorted(cand)[0][3]))
+    print("heroes:", [(h, names[types[h]], int(levels[h]), f"riser {100 * riser[h]:.1f} cm",
+                       f"edge contacts {int(edge_count[h].item())}") for h in heroes])
+    empty = np.zeros((len(qpos), env.num_envs, 0))
+    np.savez_compressed(a.out, mode=mode, qpos=np.stack(qpos), hits=np.stack(hits),
+                        dists=np.stack(dists) if dists else empty, spos=np.stack(spos) if spos else empty,
                         frames_in=np.stack(frames_in), rise=rise, fallen=np.stack(fallen), riser=riser,
+                        foot_pos=np.stack(foot_pos), foot_found=np.stack(foot_found), foot_edge=np.stack(foot_edge),
+                        scan_shape=np.array([0, 0] if scan_params is None else [
+                            len(microduck_mdp.scan_grid(scan_params["x_range"], scan_params["y_range"], scan_params["res"])[0]),
+                            len(microduck_mdp.scan_grid(scan_params["x_range"], scan_params["y_range"], scan_params["res"])[1])]),
                         names=np.array(names), types=types, levels=levels, env_origins=origins,
-                        heroes=np.array(heroes), fps=FPS, dt=env.step_dt * stride)
+                        heroes=np.array(heroes), fps=FPS, dt=env.step_dt * stride, task=a.task)
     print("states →", a.out)
 
 
@@ -92,8 +150,16 @@ def _turbo(x: np.ndarray) -> np.ndarray:
     return colormaps["turbo"](1.0 - np.clip(x, 0, 1))[..., :3]
 
 
+def _height_colour(scan_value: np.ndarray) -> np.ndarray:
+    """Oracle scan values (trunk_z − h − nominal: 0 = the ground the robot stands on, −0.04 = 4 cm
+    higher) → cool for the robot's own level, warm for terrain above it."""
+    from matplotlib import colormaps
+    return colormaps["turbo"](0.15 + 0.85 * np.clip(-scan_value / 0.10, 0, 1))[..., :3]
+
+
 class Showcase:
     def __init__(self, env, width: int, height: int):
+        self.hf = microduck_mdp.terrain_height_field(env)     # halo height = the ground under the foot
         self.mjm = env.sim.mj_model
         self.mjd = mujoco.MjData(self.mjm)
         self.extra = mujoco.MjData(self.mjm)
@@ -119,7 +185,8 @@ class Showcase:
         self.scene.ngeom += 1
 
     def render(self, qpos_all, hero, cam, spos, hits, dists, grey=(0.55, 0.55, 0.6, 0.22),
-               ghost_min_dist: float = 0.6) -> np.ndarray:
+               ghost_min_dist: float = 0.6, mode: str = "tof", scan_values=None,
+               feet=None) -> np.ndarray:
         self._load(self.mjd, qpos_all[hero])
         self.renderer.update_scene(self.mjd, cam, self.opt)
         for i in range(qpos_all.shape[0]):
@@ -131,17 +198,33 @@ class Showcase:
             mujoco.mjv_addGeoms(self.mjm, self.extra, self.opt, self.pert, mujoco.mjtCatBit.mjCAT_DYNAMIC, self.scene)
             for g in range(n0, self.scene.ngeom):
                 self.scene.geoms[g].rgba[:] = grey
-        # ToF beams from the sensor to the hit points, coloured by range (near warm → far cool).
-        col = _turbo(np.clip(dists, 0, 1.0) * 0.85)          # 1 m → blue, not the map's near-black end
-        for z in range(64):
-            if dists[z] < 0:
-                continue
-            far = dists[z] > 1.0
-            self._add_marker(mujoco.mjtGeom.mjGEOM_CAPSULE, spos, (0, 0, 0), (*col[z], 0.18 if far else 0.45),
-                             frm=spos, to=hits[z], width=0.0005)
-            if not far:                                         # hit points only where the policy can see them
-                self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, hits[z], (0.0045, 0, 0), (*col[z], 0.95))
-        self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, spos, (0.006, 0, 0), (1, 1, 1, 1))
+        if mode == "tof":
+            # ToF beams from the sensor to the hit points, coloured by range (near warm → far cool).
+            col = _turbo(np.clip(dists, 0, 1.0) * 0.85)      # 1 m → blue, not the map's near-black end
+            for z in range(64):
+                if dists[z] < 0:
+                    continue
+                far = dists[z] > 1.0
+                self._add_marker(mujoco.mjtGeom.mjGEOM_CAPSULE, spos, (0, 0, 0), (*col[z], 0.18 if far else 0.45),
+                                 frm=spos, to=hits[z], width=0.0005)
+                if not far:                                     # hit points only where the policy can see them
+                    self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, hits[z], (0.0045, 0, 0), (*col[z], 0.95))
+            self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, spos, (0.006, 0, 0), (1, 1, 1, 1))
+        else:
+            # The height map the policy reads: one dot per scan point, on the terrain surface.
+            col = _height_colour(scan_values)
+            for z in range(hits.shape[0]):
+                self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, hits[z] + np.array([0, 0, 0.003]), (0.0042, 0, 0),
+                                 (*col[z], 0.95))
+        if feet is not None:
+            # Feet at contact: green = on one level, red = against a riser / straddling an edge.
+            pos, found, edge = feet
+            for f in range(2):
+                if found[f]:
+                    rgba = (0.95, 0.12, 0.1, 0.95) if edge[f] else (0.15, 0.85, 0.35, 0.85)
+                    ground = float(self.hf.heights(torch.tensor(pos[f][None, :2], dtype=torch.float32))[0])
+                    self._add_marker(mujoco.mjtGeom.mjGEOM_CYLINDER, np.array([pos[f][0], pos[f][1], ground + 0.0015]),
+                                     (0.04, 0.0012, 0), rgba)             # wider than the sole: a halo
         return self.renderer.render().copy()
 
     def close(self):
@@ -159,7 +242,8 @@ def _font(size):
     return ImageFont.load_default()
 
 
-def _compose(frame: np.ndarray, grid: np.ndarray, lines: list[str], footer: str) -> np.ndarray:
+def _compose(frame: np.ndarray, grid: np.ndarray, lines: list[str], footer: str, mode: str = "tof",
+             scan_shape=(0, 0)) -> np.ndarray:
     from PIL import Image, ImageDraw
     img = Image.fromarray(frame).convert("RGBA")
     W, H = img.size
@@ -172,6 +256,22 @@ def _compose(frame: np.ndarray, grid: np.ndarray, lines: list[str], footer: str)
                   stroke_width=2, stroke_fill=(0, 0, 0, 180))
         y += 34 if j == 0 else 26
     draw.text((24, H - 34), footer, font=_font(16), fill=(220, 220, 220, 220), stroke_width=2, stroke_fill=(0, 0, 0, 160))
+    if mode == "scan":
+        # Height-map inset (top-right): the 19×7 grid the policy receives, forward = up, left = left.
+        nx, ny = int(scan_shape[0]), int(scan_shape[1])
+        g = grid.reshape(nx, ny)[::-1, ::-1]                  # far row on top, +y (left) on the left
+        cell, pad = 14, 1
+        wpx, hpx = ny * (cell + pad) + pad, nx * (cell + pad) + pad
+        x0, y0 = W - wpx - 24, 46
+        draw.rectangle((x0 - 8, y0 - 30, x0 + wpx + 8, y0 + hpx + 30), fill=(0, 0, 0, 150))
+        draw.text((x0 - 2, y0 - 26), "height map", font=f2, fill=(255, 255, 255, 235))
+        col = (_height_colour(g) * 255).astype(np.uint8)
+        for r in range(nx):
+            for c in range(ny):
+                xx, yy = x0 + pad + c * (cell + pad), y0 + pad + r * (cell + pad)
+                draw.rectangle((xx, yy, xx + cell, yy + cell), fill=(*(int(u) for u in col[r, c]), 255))
+        draw.text((x0 - 2, y0 + hpx + 6), "▲ forward", font=_font(14), fill=(230, 230, 230, 230))
+        return np.asarray(img.convert("RGB"))
     # ToF inset (top-right): the frame the policy receives, near = warm, 1.0 = nothing within 1 m.
     cell, pad = 22, 2
     size = 8 * cell + 9 * pad
@@ -196,9 +296,12 @@ def render(a) -> None:
     names = [str(n) for n in st["names"]]
     types, levels, heroes = st["types"], st["levels"], [int(h) for h in st["heroes"]]
     qpos, hits, dists, spos, frames_in, rise, riser = (st[k] for k in ("qpos", "hits", "dists", "spos", "frames_in", "rise", "riser"))
+    mode = str(st["mode"]) if "mode" in st else "tof"
+    task = str(st["task"]) if "task" in st else TASK
+    has_feet = "foot_pos" in st
     T, N = qpos.shape[:2]
     dt = float(st["dt"])
-    env = build_env(TASK, N, a.seed, "cpu", fixed_heading=False)   # same grid: seeded generator
+    env = build_env(task, N, a.seed, "cpu", fixed_heading=False)   # same grid: seeded generator
     shw = Showcase(env, a.width, a.height)
     writer = imageio.get_writer(a.video, fps=FPS, codec="libx264", quality=8, macro_block_size=1)
     try:
@@ -215,14 +318,27 @@ def render(a) -> None:
                 cam.distance = 1.15
                 cam.azimuth = -75.0 + 45.0 * u          # over the left shoulder, slowly swinging round to the side
                 cam.elevation = -14.0
-                frame = shw.render(qpos[k], hero, cam, spos[k, hero], hits[k, hero], dists[k, hero])
+                feet = (st["foot_pos"][k, hero], st["foot_found"][k, hero], None) if has_feet else None
+                if feet is not None:
+                    edges_now = st["foot_edge"][k, hero] > (st["foot_edge"][k - 1, hero] if k else 0)
+                    feet = (feet[0], feet[1], np.array([edges_now and feet[1][f] for f in range(2)]))
+                frame = shw.render(qpos[k], hero, cam, spos[k, hero] if mode == "tof" else None, hits[k, hero],
+                                   dists[k, hero] if mode == "tof" else None, mode=mode,
+                                   scan_values=frames_in[k, hero] if mode == "scan" else None, feet=feet)
+                title = ("Microduck · step-up with ToF perception" if mode == "tof"
+                         else "Microduck · step-up with a terrain height map (oracle)")
                 lines = [
-                    "Microduck · step-up with ToF perception",
+                    title,
                     f"{label} · riser {100 * riser[hero]:.1f} cm",
-                    f"t = {k * dt:4.1f} s · trunk rise {100 * rise[k, hero]:+.1f} cm",
+                    f"t = {k * dt:4.1f} s · trunk rise {100 * rise[k, hero]:+.1f} cm"
+                    + (f" · edge contacts {int(st['foot_edge'][k, hero])}" if has_feet else ""),
                 ]
-                footer = "beams: the head ToF's 64 zones by range  ·  grey: other robots of the same batch  ·  policy: 61-D + 64 ToF → 14 servos"
-                writer.append_data(_compose(frame, frames_in[k, hero], lines, footer))
+                if mode == "tof":
+                    footer = "beams: the head ToF's 64 zones  ·  feet: green = clean contact, red = edge  ·  grey: other robots"
+                else:
+                    footer = "dots: the 19×7 height map the policy reads  ·  feet: green = clean contact, red = edge  ·  grey: other robots"
+                writer.append_data(_compose(frame, frames_in[k, hero], lines, footer, mode=mode,
+                                            scan_shape=st["scan_shape"] if "scan_shape" in st else (0, 0)))
     finally:
         writer.close()
         shw.close()
@@ -240,6 +356,7 @@ def main() -> None:
     r.add_argument("--vx", type=float, default=0.25)
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--out", default="showcase.npz")
+    r.add_argument("--task", default=TASK)
     v = sub.add_parser("render")
     v.add_argument("--states", required=True)
     v.add_argument("--video", default="showcase.mp4")
