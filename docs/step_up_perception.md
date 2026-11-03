@@ -149,3 +149,25 @@ Consequences for the design: the missing piece is MEMORY of the terrain between 
 stepping on it (recurrent actor, or a body-frame height map built from ToF + odometry — the
 runtime's `kinematics::tof::Reprojector` already gives points in the trunk frame), then an
 objective that prices stumbles and falls, and a success metric that counts clean climbs only.
+
+## 11. Run 8: the oracle bound (2026-11-03, wandb 8vey00uh)
+
+Requirement (the user's): every physically feasible step crossed cleanly, as a person would —
+no toe catch, no edge landing; a step too high is refused (later: portable mini-stairs).
+
+Run 8 (`Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck`, warm start from run 4's blind 61-D
+policy, 2048 envs × 4000 it) asks one question: **with perfect terrain memory, can this robot
+climb cleanly, and up to what height?** Its actor reads the 61-D contract plus an exact height
+scan of the ground around and ahead of the feet (19 × 7 points, 3 cm, trunk yaw frame, ±5 mm
+noise) — the layout a ToF + odometry height map would have on the robot. Objective changes:
+
+- `foot_edge_contact` (−10 per foot-second): a foot in contact while the ground under its
+  footprint is not one level (exact height field + the feet's collision boxes);
+- `fall` (−10 once) and the step-up stack resized to dt units — the runs 6-7b weights paid
+  ≈ 0.07 for a whole climb because mjlab scales every term by dt;
+- the survival ladder promotes only episodes with ≤ 3 foot-steps of edge contact.
+
+Reading the result: if the clean-climb rate (step_up_failures.py) is high up to some height,
+perception/memory is the bottleneck below it and the ToF height map is worth building; the
+height where it breaks down is the robot's envelope (stop above it). If it is low everywhere,
+the gait/actuators are the limit and no sensor will fix it.
