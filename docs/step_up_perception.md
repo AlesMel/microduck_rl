@@ -227,3 +227,29 @@ it and stepping on it. Two ways, cheapest first:
 2. a body-frame height map built from the ToF and odometry, in the oracle's exact layout
    (19 × 7, 3 cm), with sim-side drift/noise/unseen-cell DR, and the same map built in `robotd`
    from `kinematics::tof::Reprojector` + leg odometry.
+
+## 14. A height map from the ToF only: how close to the oracle? (2026-11-03)
+
+Run 8's actor read the simulator's exact terrain — an oracle that cannot go on the robot. (The
+CRITIC and the REWARDS may keep exact geometry: they are training-only.) `tasks/tof_map.py`
+builds the same 19 × 7 scan from what the duck has: ToF frames at 15 Hz with noise and dropouts,
+the sensor pose from kinematics, and the trunk pose from odometry with drift (±3 % scale, ±2°/m
+yaw, 1 cm/√m random walk, ±1 cm/m in z). A 2 cm grid per env, anchored at the episode start,
+keeps the running mean of the heights measured per cell; hits are also spread one cell to each
+side (the zone columns are 3-5 cm apart at 0.3-0.5 m, which leaves lateral stripes otherwise).
+`scripts/eval/tof_map_quality.py`, 256 robots driven by the run 9 policy (head down), compared
+with the oracle scan at the same pose while approaching / climbing the first riser:
+
+| map | foot-zone cells known | \|err\| median / p95 | edge error median / p90 | imminent edge within 1.5 / 3 cm |
+| --- | --- | --- | --- | --- |
+| ideal ToF, perfect odometry | 74 % | 0.0 / 0.8 cm | 0 / 3 cm | 56 / 95 % |
+| ToF noise + dropouts | 74 % | 0.1 / 1.1 cm | 3 / 6 cm | 40 / 87 % |
+| + odometry drift (the robot) | 74 % | 0.2 / 1.1 cm | 3 / 6 cm | 39 / 81 % |
+
+Fusion matters: overwriting each cell with its latest hit gave edge errors p90 12 cm (single
+noisy cells read as a riser); averaging halves it. Lateral spreading raised coverage 66 → 74 %
+and imminent-edge-within-a-cell 75 → 81 %. Remaining limits: a quarter of the foot zone is never
+seen (the policy must be told which cells are unknown), and the edge is placed to one 3 cm scan
+cell, not better. The sim ToF casts each zone's centre ray; the real VL53L8CX integrates the
+cone and mixes targets at an edge, so the real edge will be blurrier — to check against real
+frames from `robotctl monitor` → `t` in front of a real step.
