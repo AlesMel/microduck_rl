@@ -408,10 +408,32 @@ Videos: `showcase_11{a,c,b}.mp4`, `compare_10_11b.mp4`, `compare_10_11c_hard.mp4
   time, not the lever. The lever shows only where the runs differ: 11c under the hard sensor, 11b
   on the 3.3-3.6 cm flights, 11a on the high column.
 
+### Where clean climbing ends (2026-11-04, `scripts/run11/limit.sh`, `failures_limit_*.json`)
+
+Single steps beyond the training range, play grid with `--riser-range`, 384 robots, 12 s, 0.25 m/s,
+the base task's nominal sensor. 11a was trained up to 6.5 cm, 11b up to 4 cm:
+
+| riser | 11a clean / fell | 11b clean / fell |
+| --- | --- | --- |
+| 5.1 cm | 90 % / 5 % | 98 % / 2 % |
+| 5.7 cm | 91 % / 0 % | 94 % / 4 % |
+| 6.4 cm | 91 % / 2 % | 88 % / 5 % |
+| 7.4 cm | 85 % / 5 % | 53 % / 35 % |
+| 7.7 cm | 88 % / 2 % | 68 % / 27 % |
+| 8.4 cm | 68 % / 25 % | 58 % / 34 % |
+| 9.2 cm | 30 % / 67 % | 40 % / 53 % |
+| 10.3 cm | 5 % / 95 % | 0 % / 100 % |
+
+The limit is a cliff between 8 and 9 cm (trunk at 11.5 cm, 25 cm robot): up to 7.7 cm the policy
+trained on 6.5 cm risers climbs 85-91 % clean with ≤ 5 % falls, at 8.4 cm one in four falls, at
+9.2 cm two in three, 10.3 cm is a wall (toe catches on 35 / 55 robots). Training range matters past
+7 cm: 11b (4 cm max) already falls 35 % at 7.4 cm where 11a falls 5 %. So the refusal belongs at
+≈ 8 cm, twice the 4.2 cm assumed for run 11a, and the climb column should go to 7.5 cm.
+
 ### Next (after run 11)
 
-1. **Find the real envelope**: battery run 11a (and 11b) on single steps 6-10 cm; the refusal
-   threshold is wherever clean collapses, not 4.2 cm.
+1. ~~Find the real envelope~~ — done above: climb ≤ 7.5 cm, refuse ≥ 8.5 cm, 7.5-8.5 cm is the
+   grey band to leave out of the grid.
 2. **Retrain the refusal above that height** with a cost that matches the climb: terminate (or pay
    the fall penalty) when the trunk crosses an infeasible riser, keep the zero target in the zone.
 3. **Merge the levers**: 11b's tread DR + placement and 11c's hard sensor model in one run (they

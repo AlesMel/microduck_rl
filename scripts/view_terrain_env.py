@@ -62,8 +62,11 @@ def _tile_name(names: list[str]) -> str | None:
 
 
 def build_env(task: str, num_envs: int, seed: int, device: str = "cpu",
-              fixed_heading: bool = False) -> ManagerBasedRlEnv:
+              fixed_heading: bool = False, cfg_hook=None) -> ManagerBasedRlEnv:
+    """``cfg_hook(cfg)``: an optional edit of the play cfg before the env is built (e.g. other riser heights)."""
     cfg = load_env_cfg(task, play=True)
+    if cfg_hook is not None:
+        cfg_hook(cfg)
     cfg.scene.num_envs = num_envs
     cfg.seed = seed
     cfg.episode_length_s = 1e6                       # no time-out resets while we look

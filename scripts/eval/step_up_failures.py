@@ -59,8 +59,14 @@ def _risers(mjm: mujoco.MjModel, origin: np.ndarray) -> list[tuple[float, float]
     return sorted(out.items())
 
 
-def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: int, task: str = TASK) -> dict:
-    env = build_env(task, n, seed, device, fixed_heading=False)
+def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: int, task: str = TASK,
+        riser_range: tuple[float, float] | None = None) -> dict:
+    def hook(cfg):
+        if riser_range is not None:
+            # another span of SINGLE-step heights on the play grid (4 rows → lo, …, hi): measuring
+            # where clean climbing ends, beyond the training range
+            cfg.scene.terrain.terrain_generator.sub_terrains["single_step"].step_height_range = tuple(riser_range)
+    env = build_env(task, n, seed, device, fixed_heading=False, cfg_hook=hook)
     policy = WalkPolicy(checkpoint, vx, 0.0, 0.0, onnx=False, device=device)
     mjm = env.sim.mj_model
     robot = env.scene["robot"]
@@ -225,8 +231,10 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--task", default=TASK)
     p.add_argument("--json", default=None)
+    p.add_argument("--riser-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="single-step riser heights (m) of the play grid's 4 rows, e.g. 0.06 0.10")
     a = p.parse_args()
-    out = [run(a.checkpoint, a.device, a.num_envs, a.seconds, v, a.seed, a.task) for v in a.vx]
+    out = [run(a.checkpoint, a.device, a.num_envs, a.seconds, v, a.seed, a.task, a.riser_range) for v in a.vx]
     if a.json:
         Path(a.json).write_text(json.dumps(out, indent=1, default=float))
         print("json →", a.json)
