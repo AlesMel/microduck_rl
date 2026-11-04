@@ -37,7 +37,7 @@ from mjlab_microduck.tasks import mdp as microduck_mdp  # noqa: E402
 from mjlab_microduck.tasks import tof  # noqa: E402
 
 TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"
-STEP_TILES = ("single_step", "short_flight")
+STEP_TILES = ("single_step", "short_flight", "high_step")   # high_step: the envelope grid (run 11a)
 FPS = 25
 
 
@@ -342,7 +342,7 @@ def render(a) -> None:
     try:
         for seg, hero in enumerate(heroes if a.hero is None else [a.hero]):
             tile = names[types[hero]]
-            label = {"single_step": "single step", "short_flight": "three-riser flight"}.get(tile, tile)
+            label = {"single_step": "single step", "short_flight": "three-riser flight", "high_step": "tall single step"}.get(tile, tile)
             print(f"segment {seg}: hero {hero} on {tile} row {int(levels[hero])}, riser {100 * riser[hero]:.1f} cm")
             for k in range(T):
                 trunk = qpos[k, hero, :3]
@@ -431,7 +431,7 @@ def compare(a) -> None:
         for seg in a.segments.split(","):
             tile, row = seg.split(":")
             row = int(row)
-            label = {"single_step": "single step", "short_flight": "three-riser flight"}.get(tile, tile)
+            label = {"single_step": "single step", "short_flight": "three-riser flight", "high_step": "tall single step"}.get(tile, tile)
             heroes = []
             for sd in sides:
                 st, names = sd["st"], sd["names"]

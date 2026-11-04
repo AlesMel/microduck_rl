@@ -319,3 +319,102 @@ Checkpoint: `logs/rsl_rl/step_up/2026-11-03_20-30-50_step_up_tofmap_clean/model_
    foot-placement term on the map's level cells.
 5. Train the oracle for the same extra 4000 iterations if the "map beats oracle" question matters
    for the design; otherwise it does not change the plan.
+
+## 16. Run 11 (2026-11-03 night): the envelope, a worse sensor, the flights
+
+Three runs on run 10's checkpoint (`model_3999`, same 327-D obs, `MICRODUCK_WARM_START=1`), one
+after the other on the 12 GB box (`scripts/run11/chain.sh`, 2048 envs × 4000 it each, a battery
+after each; `scripts/run11/smoke.sh` first). Order by value: 11a → 11c → 11b. Each is run 10 plus
+ONE lever, so the batteries read against `failures_10.json` directly.
+
+**11a `Mjlab-StepUp-TofMap-Envelope-*` — "too high → stop".** The requirement (§11) has two
+halves and run 10 only trained the first. The grid gets a fourth column, `high_step`: one riser of
+4.5-6.5 cm (`HIGH_STEP_HEIGHT_RANGE`; the 4.0-4.5 band is left out so the map, p95 error 1.1 cm,
+can tell the columns apart). The objective (all privileged, from the exact height field):
+- `track_linear_velocity_stop_gated`: within `STOP_DIST` 0.30 m of a riser taller than
+  `MAX_FEASIBLE_RISE` 4.2 cm the velocity TARGET is zero — the policy still sees its 0.25 m/s
+  command (the runtime will keep sending it); standing still there pays the full tracking reward.
+- `stop_before_high_step` (cost, −2/s × |v|/0.25 while stopping is due): the explicit brake, since
+  the tracking Gaussian (std² 0.1) only loses 46 % between 0 and 0.25 m/s.
+- `height_progress` and `foot_on_step` pay nothing on the `high_step` column (`skip_tile`), so a
+  5 cm climb earns nothing and risks the edge and fall costs.
+- the ladder's progress rule exempts a robot that reached the stop zone (`_stop_seen`), so the
+  refusal promotes instead of being demoted as "no progress".
+Battery: `high_step` tiles report `stopped` (survived, not on top, < 0.05 m/s over the last 0.5 s,
+before the riser) with the clean count and the stop distance; the feasible rows must stay at run
+10's clean rates — the thing to check is that stopping did not leak into the 3.1-3.9 cm rows.
+
+**11c `Mjlab-StepUp-TofMap-Hard-*` — the map under a worse sensor.** The sim casts one ray per
+zone; the VL53L8CX integrates a 5.6° cone and mixes the targets at an edge, and the real odometry
+is a guess. The sensor gets 4 extra rays per zone inside its cone (`tof.TofPatternCfg(cone_rays)`,
+after the 64 centres so every `[:, :64]` reader is unchanged) and each frame reads every zone from
+ONE of its five rays at random (`TofHeightMap.pick_cone`) — at an edge the return lands on either
+level, on the floor it is the centre's hit. Noise, dropouts and all four drift terms are doubled
+(`TOF_MAP_KWARGS_HARD`). The critic keeps the exact scan. Batteries: on the base grid (comparable
+to run 10) and under the hard sensor; the chain also runs run 10's checkpoint under the hard sensor
+first, so "what the sensor model alone costs" is on the table before 11c finishes.
+
+**11b `Mjlab-StepUp-TofMap-Flights-*` — stride adaptation.** Run 10's flights (57-67 % clean) were
+trained on 15 cm treads only. Training tiles draw the flight's tread per tile from 11-24 cm
+(`STEP_UP_TREAD_RANGE`; ≥ 2 foot lengths); the play grid keeps 15 cm so the battery stays
+comparable. `foot_placement_bonus` (+1 per touchdown, `PLACEMENT_WEIGHT` 50·dt) pays a touchdown
+that is on raised ground, one level under the footprint grown by 2 cm, a stride of ≥ 4 cm from
+that foot's previous touchdown, and still inside the flight (exact ground 0.5 m ahead is higher) —
+on the top platform it pays nothing, so it cannot be farmed by walking on.
+
+### Results (2026-11-04, `chain11_summary.txt`; battery 384 robots, 12 s, 0.25 m/s, same seed as run 10)
+
+| step | riser | 10 clean | 11a Envelope | 11c Hard | 11c under the hard sensor | 11b Flights |
+| --- | --- | --- | --- | --- | --- | --- |
+| single | 2.0 cm | 83 % | 91 % | 88 % | 63 % | 95 % |
+| single | 2.5 cm | 79 % | 83 % | 98 % | 89 % | 98 % |
+| single | 3.1 cm | 86 % | 88 % | 91 % | 91 % | 100 % |
+| single | 3.9 cm | 65 % | 89 % | 80 % | 80 % | 82 % |
+| flight | 2.0 cm | 34 % | 60 % | 55 % | 40 % | 57 % |
+| flight | 2.6 cm | 62 % | 77 % | 79 % | 72 % | 66 % |
+| flight | 3.3 cm | 67 % | 52 % | 70 % | 63 % | 81 % |
+| flight | 3.6 cm | 57 % | 74 % | 55 % | 52 % | 75 % |
+| **high** | **4.5 cm** | – | **85 %** (0 stopped) | – | – | – |
+| **high** | **5.3 cm** | – | **91 %** (0 stopped) | – | – | – |
+| **high** | **5.8 cm** | – | **85 %** (0 stopped) | – | – | – |
+| **high** | **6.5 cm** | – | **96 %** (0 stopped) | – | – | – |
+| all | | 228 / 345, 6 falls | 279 / 345, 3 falls | 266 / 345, 0 falls | 238 / 345, 6 falls | 283 / 345, 3 falls |
+
+Control: run 10 itself under the hard sensor = 198 / 345 clean, 10 falls (the sensor model alone
+costs ≈ 30 clean climbs). wandb: 11a `v1zgwli4`, 11c `ommolfg5`, 11b `o34sb08x`; checkpoints
+`model_3999` in `logs/rsl_rl/step_up/2026-11-03_23-43-02_step_up_tofmap_envelope`,
+`2026-11-04_01-41-38_step_up_tofmap_hard`, `2026-11-04_03-41-40_step_up_tofmap_flights` (urkui-3).
+Videos: `showcase_11{a,c,b}.mp4`, `compare_10_11b.mp4`, `compare_10_11c_hard.mp4`.
+
+- **11a: the stop was never learned — the duck climbed the "too high" column instead.** On
+  4.5-6.5 cm it ended on top 74 / 77 times, 85-96 % clean, ONE fall, zero stops (the showcase hero
+  climbs a 6.2 cm riser with no edge contact). `stop_before_high_step` sat at −0.05 per step for
+  the whole run against a mean reward of 44: 20 % of the robots × 1.2 s in the zone × 2/s is
+  ≈ 0.5 per episode, and once on top the velocity reward is back in full — PPO paid the toll and
+  walked on. The lesson is not about the brake but about the envelope: run 10's 3.9 cm "ceiling"
+  was the top of its training range, not the robot's limit. Before any refusal is trained again the
+  physical limit has to be measured (extend the grid upward until clean rates collapse); the
+  refusal objective then needs reward mass comparable to the climb (a terminal cost on crossing
+  the riser, or a termination), not a per-step nudge.
+- **11c: training under the worse sensor costs nothing and buys robustness.** On the nominal
+  sensor 266 / 345 clean with no fall at all; under the hard sensor 238 / 345, 6 falls, vs run 10's
+  198 / 10 under the same sensor. The 2.0 cm single step under the hard sensor (63 %) is the one
+  row where the blurred edge still hurts: a 2 cm riser is within the map's noise.
+- **11b: the flights moved most where the tread matters.** 3.3 / 3.6 cm flights 81 / 75 % clean
+  (run 10: 67 / 57 %); the 3.6 cm stalls persist (7 / 44). Single steps up to 3.1 cm are at
+  95-100 %. Best overall at 283 / 345.
+- **Confound:** every run 11 checkpoint has 4000 more iterations than run 10, and the three are
+  close on their shared rows (279 / 266 / 283 total), so most of the single-step gain is training
+  time, not the lever. The lever shows only where the runs differ: 11c under the hard sensor, 11b
+  on the 3.3-3.6 cm flights, 11a on the high column.
+
+### Next (after run 11)
+
+1. **Find the real envelope**: battery run 11a (and 11b) on single steps 6-10 cm; the refusal
+   threshold is wherever clean collapses, not 4.2 cm.
+2. **Retrain the refusal above that height** with a cost that matches the climb: terminate (or pay
+   the fall penalty) when the trunk crosses an infeasible riser, keep the zero target in the zone.
+3. **Merge the levers**: 11b's tread DR + placement and 11c's hard sensor model in one run (they
+   touch different parts of the cfg), warm-started from 11b.
+4. Runtime side unchanged from §15 (build the map in `robotd`, export, rehearse).
+

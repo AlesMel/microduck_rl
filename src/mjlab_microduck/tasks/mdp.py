@@ -3753,6 +3753,7 @@ def terrain_levels_survival(
     env, env_ids: "torch.Tensor", min_tracking: float = 0.55, reward_name: str = "track_linear_velocity",
     min_progress: float = 0.0, command_name: str = "twist", still_threshold: float = 0.05,
     demote_no_progress: bool = False, max_edge_steps: float | None = None,
+    progress_exempt_attr: str | None = None,
 ) -> dict:
     """Terrain ladder promoted on how the episode went, not on metres from the spawn.
 
@@ -3793,6 +3794,11 @@ def terrain_levels_survival(
         moved = torch.norm(asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1)
         needed = min_progress * v_cmd * float(env.max_episode_length_s)
         progressed = (moved >= needed) | (v_cmd < still_threshold)
+        exempt = getattr(env, progress_exempt_attr, None) if progress_exempt_attr else None
+        if exempt is not None:
+            # run 11a: a robot that reached a too-high step and stopped there did its job —
+            # the progress rule must not demote the refusal it is meant to train
+            progressed = progressed | exempt[env_ids].bool()
         move_up = move_up & progressed
     edge_steps = getattr(env, "_foot_edge_steps", None)
     if max_edge_steps is not None and edge_steps is not None:
@@ -8575,12 +8581,16 @@ class trunk_height_progress:
         self.fresh = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
 
     def __call__(self, env: ManagerBasedRlEnv, clip: float = 0.01,
-                 asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+                 asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG, skip_tile: str | None = None) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2], nan=0.0)
         dz = torch.where(self.fresh, torch.zeros_like(z), (z - self.prev).clamp(-clip, clip))
         self.prev = z
         self.fresh[:] = False
+        if skip_tile is not None:
+            # run 11a: no pay for rising on a tile the robot is meant to refuse (the whole
+            # episode, so the potential still telescopes on the tiles that do pay)
+            dz = torch.where(terrain_tile_mask(env, skip_tile), torch.zeros_like(dz), dz)
         return dz
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
@@ -8599,7 +8609,7 @@ class foot_on_step_bonus:
 
     def __call__(self, env: ManagerBasedRlEnv, sensor_name: str, min_rise: float = 0.012,
                  gate_tilt_above_deg: float = 40.0,
-                 asset_cfg: SceneEntityCfg = _ROLLER_FEET_SITE_CFG) -> torch.Tensor:
+                 asset_cfg: SceneEntityCfg = _ROLLER_FEET_SITE_CFG, skip_tile: str | None = None) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         contact = env.scene[sensor_name].data.found[:, :2] > 0                        # (B, 2)
         foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2] - env.scene.env_origins[:, 2:3]
@@ -8610,7 +8620,10 @@ class foot_on_step_bonus:
         on_step = contact & (foot_z >= min_rise) & upright & self.was_low
         new = on_step & ~self.paid
         self.paid |= on_step
-        return new.float().sum(dim=1)
+        out = new.float().sum(dim=1)
+        if skip_tile is not None:
+            out = torch.where(terrain_tile_mask(env, skip_tile), torch.zeros_like(out), out)   # run 11a
+        return out
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         ids = slice(None) if env_ids is None else env_ids
@@ -8767,3 +8780,171 @@ class foot_edge_contact_cost:
         # so clearing here never hides an episode from the gate.
         env_ids = slice(None) if env_ids is None else env_ids
         self._env_counter()[env_ids] = 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Step-up runs 11a / 11b — the envelope ("too high → stop") and foot placement on treads
+# (docs/step_up_perception.md §16)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def terrain_tile_mask(env, tile: str) -> "torch.Tensor":
+    """(N,) bool: envs whose tile is the sub-terrain column ``tile`` (promotion only moves rows,
+    so a robot keeps its column for the whole run). All False when the menu has no such column."""
+    terrain = env.scene.terrain
+    names = list(terrain.cfg.terrain_generator.sub_terrains.keys())
+    if tile not in names:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return terrain.terrain_types == names.index(tile)
+
+
+def ground_profile_ahead(env, look: float = 0.6, res: float = 0.01,
+                         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> tuple["torch.Tensor", "torch.Tensor"]:
+    """Exact ground height (N, K) at ``res`` spacing from the trunk out to ``look`` metres along
+    the trunk's heading, and the sample distances (K,). Privileged (the box terrain's height field)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    hf = terrain_height_field(env)
+    key = ("profile", look, res)
+    cache = getattr(env, "_scan_offsets", {})
+    if key not in cache:
+        cache[key] = torch.arange(0.0, look + 0.5 * res, res, device=env.device)
+        env._scan_offsets = cache
+    xs = cache[key]
+    pos = asset.data.root_link_pos_w
+    q = asset.data.root_link_quat_w
+    yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+    wx = pos[:, 0:1] + torch.cos(yaw)[:, None] * xs[None]
+    wy = pos[:, 1:2] + torch.sin(yaw)[:, None] * xs[None]
+    return hf.heights(torch.stack([wx, wy], dim=-1)), xs
+
+
+def high_riser_ahead(env, max_rise: float, look: float = 0.6, res: float = 0.01) -> tuple["torch.Tensor", "torch.Tensor"]:
+    """Per env: is there a single riser higher than ``max_rise`` within ``look`` m ahead, and how
+    far (metres along the heading; ``look`` where there is none). A riser = the jump between two
+    neighbouring 1 cm samples of the exact ground; a flight of feasible risers never trips it."""
+    h, xs = ground_profile_ahead(env, look, res)
+    jump = h[:, 1:] - h[:, :-1]                                 # (N, K−1)
+    high = jump > max_rise
+    first = torch.argmax(high.int(), dim=1)                     # first index, 0 if none
+    due = high.any(dim=1)
+    dist = torch.where(due, xs[1:][first], torch.full_like(xs[:1].expand(h.shape[0]), look))
+    return due, dist
+
+
+def stop_due(env, max_rise: float, stop_dist: float, look: float = 0.6) -> "torch.Tensor":
+    """(N,) bool, computed once per env step and cached: a too-high riser is within ``stop_dist``
+    ahead — the robot is expected to stand still. The latch ``env._stop_seen`` (any step this
+    episode) is for the ladder's progress exemption; ``stop_before_high_step`` clears it on reset."""
+    step = int(env.common_step_counter)
+    cache = getattr(env, "_stop_cache", None)
+    if cache is not None and cache[0] == step and cache[1] == (max_rise, stop_dist, look):
+        return cache[2]
+    high, dist = high_riser_ahead(env, max_rise, look)
+    due = high & (dist <= stop_dist)
+    seen = getattr(env, "_stop_seen", None)
+    if seen is None or seen.shape[0] != env.num_envs:
+        seen = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    env._stop_seen = seen | due
+    env._stop_cache = (step, (max_rise, stop_dist, look), due)
+    return due
+
+
+def track_linear_velocity_stop_gated(env: ManagerBasedRlEnv, std: float, command_name: str,
+                                     max_rise: float, stop_dist: float, look: float = 0.6,
+                                     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """mjlab's ``track_linear_velocity`` with the TARGET set to zero where :func:`stop_due` — the
+    policy still sees its 0.25 m/s command (the runtime will send it), but in front of a riser it
+    cannot climb the paid behaviour is standing still. ≥ 0 → positive weight, same as the stock term."""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    target = command[:, :2].clone()
+    target[stop_due(env, max_rise, stop_dist, look)] = 0.0
+    actual = asset.data.root_link_lin_vel_b
+    err = torch.sum(torch.square(target - actual[:, :2]), dim=1) + torch.square(actual[:, 2])
+    return torch.exp(-err / std**2)
+
+
+class stop_before_high_step:
+    """Cost: forward speed (|v_xy| / ``v_ref``, clipped at 2) while :func:`stop_due` — walking into a
+    riser the duck cannot climb. Zero elsewhere, zero when standing in the stop zone. ≥ 0 → NEGATIVE
+    weight. Owns the per-episode latch ``env._stop_seen`` (cleared here on reset) that exempts a
+    stopped robot from the ladder's progress rule."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        env._stop_seen = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._stop_cache = None
+        self._seen = lambda: env._stop_seen
+
+    def __call__(self, env: ManagerBasedRlEnv, max_rise: float, stop_dist: float, look: float = 0.6,
+                 v_ref: float = 0.25, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        due = stop_due(env, max_rise, stop_dist, look)
+        speed = torch.norm(asset.data.root_link_lin_vel_b[:, :2], dim=1) / v_ref
+        return torch.where(due, speed.clamp(max=2.0), torch.zeros_like(speed))
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        # The latch lives on the env: the ladder reads it at reset, which runs BEFORE this reset.
+        ids = slice(None) if env_ids is None else env_ids
+        self._seen()[ids] = False
+
+
+class foot_placement_bonus:
+    """Run 11b: pays 1 per TOUCHDOWN that is (a) on raised ground (sole ≥ ``min_rise`` above the
+    origin), (b) one level under the footprint grown by ``margin`` in x and y (the foot is centred
+    on its tread, not near an edge), (c) a stride of ≥ ``min_stride`` from that foot's previous
+    touchdown (no stomping in place), and (d) still INSIDE a flight: exact ground ``look_ahead``
+    m ahead is higher than the foot (on the top platform it pays nothing — the velocity reward
+    walks the robot on). ≥ 0 → POSITIVE weight. Privileged geometry, training only."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        mjm = env.sim.mj_model
+        names = cfg.params.get("foot_geoms", ("robot/left_foot_collision", "robot/right_foot_collision"))
+        self.gid = [mjm.geom(n).id for n in names]
+        aabb = torch.as_tensor(mjm.geom_aabb[self.gid], dtype=torch.float32, device=env.device)
+        signs = torch.tensor([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
+                             dtype=torch.float32, device=env.device)
+        self.local = aabb[:, None, :3] + signs[None] * aabb[:, None, 3:]                         # (F, 8, 3)
+        n, F = env.num_envs, len(self.gid)
+        self.was_down = torch.zeros(n, F, dtype=torch.bool, device=env.device)
+        self.last_xy = torch.full((n, F, 2), float("nan"), device=env.device)
+
+    def corners(self, env) -> "torch.Tensor":
+        xpos = env.sim.data.geom_xpos[:, self.gid]
+        xmat = env.sim.data.geom_xmat[:, self.gid].reshape(-1, len(self.gid), 3, 3)
+        return xpos[:, :, None, :] + torch.einsum("bfij,fkj->bfki", xmat, self.local)
+
+    def __call__(self, env: ManagerBasedRlEnv, sensor_name: str, min_rise: float = 0.012, margin: float = 0.02,
+                 tol: float = 0.005, min_stride: float = 0.04, look_ahead: float = 0.5,
+                 foot_geoms: tuple = ("robot/left_foot_collision", "robot/right_foot_collision"),
+                 asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+        del foot_geoms
+        hf = terrain_height_field(env)
+        found = env.scene[sensor_name].data.found[:, : len(self.gid)] > 0                       # (B, F)
+        touchdown = found & ~self.was_down
+        self.was_down = found
+        corners = self.corners(env)                                                            # (B, F, 8, 3)
+        centre = corners.mean(dim=2)                                                           # (B, F, 3)
+        # footprint grown by the margin: the 8 corners pushed outwards in xy from the centre
+        rel = corners[..., :2] - centre[:, :, None, :2]
+        grown = centre[:, :, None, :2] + rel + margin * torch.sign(rel)
+        xy = torch.cat([grown, centre[:, :, None, :2]], dim=2)
+        h = hf.heights(xy)                                                                     # (B, F, 9)
+        level = (h.amax(dim=2) - h.amin(dim=2)) <= tol
+        raised = corners[..., 2].amin(dim=2) - env.scene.env_origins[:, None, 2] >= min_rise
+        # inside a flight: the ground look_ahead metres along the heading is higher than this foot
+        asset: Entity = env.scene[asset_cfg.name]
+        q = asset.data.root_link_quat_w
+        yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        ahead = centre[..., :2] + look_ahead * torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=1)[:, None, :]
+        more_to_come = hf.heights(ahead) > h.amax(dim=2) + 0.5 * min_rise
+        stride = torch.norm(centre[..., :2] - self.last_xy, dim=2)
+        strode = torch.isnan(stride) | (stride >= min_stride)
+        self.last_xy = torch.where(touchdown[..., None], centre[..., :2], self.last_xy)
+        good = touchdown & raised & level & strode & more_to_come
+        return good.float().sum(dim=1)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.was_down[ids] = False
+        self.last_xy[ids] = float("nan")
+

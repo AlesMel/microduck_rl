@@ -56,25 +56,55 @@ def tof_beams_site_frame() -> np.ndarray:
     return tof_beams_sensor_frame()
 
 
+# Each zone integrates a cone of FOV/8 = 5.6° — the centre ray is only its middle. Sub-rays at
+# these fractions of the half-zone angle (elevation, azimuth) sample the cone's corners.
+CONE_OFFSETS = ((0.6, 0.6), (0.6, -0.6), (-0.6, 0.6), (-0.6, -0.6))
+
+
+def tof_cone_beams_sensor_frame(cone_rays: int) -> np.ndarray:
+    """``cone_rays`` (≤ 4) extra beams per zone inside its cone, (64 × cone_rays, 3), ZONE-MAJOR
+    (ray 64 + z·cone_rays + k belongs to zone z). With the 64 centre beams first, every consumer
+    that reads ``[:, :64]`` still gets the wire frame."""
+    assert 0 < cone_rays <= len(CONE_OFFSETS)
+    half = math.radians(FOV_DEG / 2.0 - FOV_DEG / COLS / 2.0)
+    step = 2.0 * half / (COLS - 1)
+    half_zone = math.radians(FOV_DEG / COLS / 2.0)
+    beams = np.zeros((N_ZONES * cone_rays, 3))
+    for i in range(N_ZONES):
+        elevation = half - (i // COLS) * step
+        azimuth = half - (i % COLS) * step
+        for k, (de, da) in enumerate(CONE_OFFSETS[:cone_rays]):
+            e, a = elevation + de * half_zone, azimuth + da * half_zone
+            beams[i * cone_rays + k] = (math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e))
+    return beams
+
+
 @dataclass
 class TofPatternCfg:
     """mjlab ray pattern for the VL53L8CX, duck-typed like ``PinholeCameraPatternCfg``: 64
-    diverging rays from the site origin, wire order, site frame (= sensor frame)."""
+    diverging rays from the site origin, wire order, site frame (= sensor frame); with
+    ``cone_rays`` > 0, that many extra rays per zone inside its cone follow (run 11c's edge blur:
+    the real sensor integrates the cone and mixes targets at an edge)."""
+
+    cone_rays: int = 0
 
     def generate_rays(self, mj_model, device: str) -> tuple[torch.Tensor, torch.Tensor]:
         del mj_model
-        directions = torch.as_tensor(tof_beams_site_frame(), dtype=torch.float32, device=device)
-        offsets = torch.zeros((N_ZONES, 3), dtype=torch.float32, device=device)
+        beams = tof_beams_site_frame()
+        if self.cone_rays > 0:
+            beams = np.concatenate([beams, tof_cone_beams_sensor_frame(self.cone_rays)], axis=0)
+        directions = torch.as_tensor(beams, dtype=torch.float32, device=device)
+        offsets = torch.zeros((directions.shape[0], 3), dtype=torch.float32, device=device)
         return offsets, directions
 
 
-def make_tof_sensor_cfg(name: str = TOF_SENSOR_NAME, debug_vis: bool = False) -> RayCastSensorCfg:
+def make_tof_sensor_cfg(name: str = TOF_SENSOR_NAME, debug_vis: bool = False, cone_rays: int = 0) -> RayCastSensorCfg:
     """The scene sensor. Geom group 0 = the terrain (same as ``foot_height_scan``); the parent
     body (``jaw_soft``) is excluded so the beak does not shadow the grid."""
     return RayCastSensorCfg(
         name=name,
         frame=ObjRef(type="site", name=TOF_SITE, entity="robot"),
-        pattern=TofPatternCfg(),
+        pattern=TofPatternCfg(cone_rays=cone_rays),
         ray_alignment="base",
         max_distance=RANGE_MAX_M,
         exclude_parent_body=True,

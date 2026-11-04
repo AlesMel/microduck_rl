@@ -32,7 +32,8 @@ from view_terrain_env import WalkPolicy, _terrain_layout, build_env  # noqa: E40
 from mjlab_microduck.tasks import tof  # noqa: E402
 
 TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"
-STEP_TILES = ("single_step", "short_flight")
+STEP_TILES = ("single_step", "short_flight", "high_step")   # high_step (run 11a): the right answer is to STOP
+HIGH_TILES = ("high_step",)
 VIEW_M = 1.0          # the policy's clip: beyond this a zone reads "nothing"
 TOL_Z = 0.003         # m, sole "below the top"
 CATCH_X = (-0.004, 0.015)   # m, toe within this of a riser face (before, past)
@@ -120,6 +121,10 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
         end = fell_t
         z0 = R["tz"][0, i]
         on_top = fell_t == T and (R["tz"][-25:, i].mean() - z0) >= 0.8 * riser_total
+        # run 11a: on a too-high tile a robot that survived, never got on top and ended still
+        # (< 0.05 m/s over the last 0.5 s) before the riser has STOPPED — the wanted outcome
+        stopped = (names[types[i]] in HIGH_TILES and fell_t == T and not on_top
+                   and abs(R["vx"][-25:, i].mean()) < 0.05 and R["tx"][-1, i] < xr)
         catches, edges = [], []
         for f in range(2):
             prev_c = prev_e = False
@@ -155,7 +160,8 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
         near_m = (dist > 0.05) & (dist < 0.2)
         row = {
             "robot": i, "tile": names[types[i]], "row": int(levels[i]), "riser_cm": round(100 * (top1 - origins[i, 2]), 2),
-            "outcome": "top" if on_top else ("fell" if fell_t < T else "stalled"),
+            "outcome": "top" if on_top else ("fell" if fell_t < T else ("stopped" if stopped else "stalled")),
+            "stop_dist_m": float(xr - R["tx"][-1, i]) if stopped else None,
             "toe_catches": len(catches), "hard_catches": sum(c[2] > 0.5 for c in catches),
             "catch_fx_over_fz": [c[2] for c in catches],
             "edge_landings": len(edges),
@@ -182,8 +188,11 @@ def run(checkpoint: str, device: str, n: int, seconds: float, vx: float, seed: i
     for r in rows:
         groups[(r["tile"], r["row"])].append(r)
     for (tile, row), rs in sorted(groups.items()):
-        oc = {o: sum(r["outcome"] == o for r in rs) for o in ("top", "fell", "stalled")}
-        print(f"  {tile:12s} row {row} riser {rs[0]['riser_cm']:.1f} cm: top {oc['top']} fell {oc['fell']} stalled {oc['stalled']} / {len(rs)}"
+        oc = {o: sum(r["outcome"] == o for r in rs) for o in ("top", "fell", "stalled", "stopped")}
+        stop_txt = (f" stopped {oc['stopped']} (clean {sum(r['outcome'] == 'stopped' and r['toe_catches'] == 0 and r['edge_landings'] == 0 for r in rs)},"
+                    f" {100 * med('stop_dist_m', [r for r in rs if r['outcome'] == 'stopped']):.0f} cm before)"
+                    if tile in HIGH_TILES else "")
+        print(f"  {tile:12s} row {row} riser {rs[0]['riser_cm']:.1f} cm: top {oc['top']} fell {oc['fell']} stalled {oc['stalled']}{stop_txt} / {len(rs)}"
               f" | toe catches {sum(r['toe_catches'] for r in rs)} (robots with ≥1: {sum(r['toe_catches'] > 0 for r in rs)})"
               f", edge landings {sum(r['edge_landings'] for r in rs)}"
               f" | blind {med('blind_s', rs):.2f} s / {100 * med('blind_travel_m', rs):.0f} cm"

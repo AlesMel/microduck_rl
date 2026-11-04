@@ -39,8 +39,14 @@ class TofHeightMap:
                  max_range: float = 1.2, min_range: float = 0.12, hz: float = 15.0,
                  noise_rel: float = 0.01, noise_abs: float = 0.004, dropout: float = 0.05,
                  odom_scale: float = 0.03, odom_yaw_per_m_deg: float = 2.0, odom_walk: float = 0.01,
-                 odom_z_per_m: float = 0.01, splat: int = 1, splat_y: int = 0, fuse: str = "mean"):
+                 odom_z_per_m: float = 0.01, splat: int = 1, splat_y: int = 0, fuse: str = "mean",
+                 cone_rays: int = 0):
         self.N, self.device, self.res = num_envs, device, res
+        # run 11c: the sensor casts cone_rays extra rays per zone (tof.TofPatternCfg); each frame
+        # reads every zone from ONE of its rays, drawn at random — at an edge the return then
+        # lands on either level (the VL53L8CX mixes the targets inside its cone), on the floor
+        # it is the same hit as the centre ray.
+        self.cone_rays = int(cone_rays)
         self.x0, self.y0 = x_range[0], y_range[0]
         self.nx = int(round((x_range[1] - x_range[0]) / res)) + 1
         self.ny = int(round((y_range[1] - y_range[0]) / res)) + 1
@@ -111,6 +117,23 @@ class TofHeightMap:
         inside = (i >= 0) & (i < self.nx) & (j >= 0) & (j < self.ny)
         return i, j, inside
 
+    def pick_cone(self, hit_pos_w: torch.Tensor, dist: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(N, 64 (1 + cone_rays), ·) sensor arrays → one ray per zone, drawn at random among the
+        centre and its cone rays (index 0 = centre, zone-major extras after the 64 centres)."""
+        n_zones = 64
+        k = self.cone_rays
+        if k <= 0:
+            return hit_pos_w, dist                      # no cone rays: whatever the caller passed (the frame)
+        assert hit_pos_w.shape[1] >= n_zones * (1 + k), "sensor has fewer rays than cone_rays asks for"
+        extra_pos = hit_pos_w[:, n_zones:n_zones * (1 + k)].reshape(-1, n_zones, k, 3)
+        extra_dist = dist[:, n_zones:n_zones * (1 + k)].reshape(-1, n_zones, k)
+        all_pos = torch.cat([hit_pos_w[:, :n_zones, None, :], extra_pos], dim=2)        # (N, 64, 1+k, 3)
+        all_dist = torch.cat([dist[:, :n_zones, None], extra_dist], dim=2)              # (N, 64, 1+k)
+        choice = torch.randint(0, 1 + k, (all_dist.shape[0], n_zones, 1), device=all_dist.device)
+        pos = torch.gather(all_pos, 2, choice[..., None].expand(-1, -1, 1, 3)).squeeze(2)
+        d = torch.gather(all_dist, 2, choice).squeeze(2)
+        return pos, d
+
     def integrate(self, sensor_pos_w: torch.Tensor, hit_pos_w: torch.Tensor, dist: torch.Tensor,
                   pos_w: torch.Tensor, step_dt: float) -> torch.Tensor:
         """Advance the 15 Hz clock; for envs with a new frame, write its noisy hits into the grid.
@@ -120,6 +143,7 @@ class TofHeightMap:
         if not bool(new.any()):
             return new
         self.phase[new] -= 1.0
+        hit_pos_w, dist = self.pick_cone(hit_pos_w, dist)
         valid = (dist >= self.min_range) & (dist <= self.max_range)
         if self.dropout > 0:
             valid &= torch.rand_like(dist) >= self.dropout
@@ -208,7 +232,8 @@ class tof_map_scan:
             self.fresh[:] = False
         self.map.advance_odometry(pos)
         d = env.scene.sensors[self.sensor_name].data
-        self.map.integrate(d.pos_w, d.hit_pos_w[:, :64], d.distances[:, :64], pos, self.step_dt)
+        n_rays = 64 * (1 + self.map.cone_rays)           # the 64 centre rays, plus the cone rays the map picks from
+        self.map.integrate(d.pos_w, d.hit_pos_w[:, :n_rays], d.distances[:, :n_rays], pos, self.step_dt)
         vals, known = self.map.scan(self.offsets, pos, quat, self.nominal)
         vals = torch.where(known, vals, torch.zeros_like(vals)).clamp(-self.clip, self.clip)
         return torch.cat([vals, known.float()], dim=1)

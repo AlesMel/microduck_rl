@@ -130,19 +130,56 @@ MAX_EDGE_STEPS = 3               # foot-steps of edge contact per episode a prom
 # tof_map (run 10): the deployable map — built from the head ToF + drifting odometry, docs §14
 TOF_MAP_KWARGS = {"res": 0.02, "fuse": "mean", "splat": 1, "splat_y": 1, "max_range": 1.2}
 
+# ── run 11a: the envelope — "too high → stop" (docs §16) ───────────────────
+# The ``high_step`` column (4.5-6.5 cm, microduck_terrains.HIGH_STEP_HEIGHT_RANGE) is to be REFUSED:
+# within STOP_DIST of a riser taller than MAX_FEASIBLE_RISE the velocity target becomes zero
+# (the policy still sees its command), forward speed there is a cost, the climb bonuses are off
+# on that column, and a robot that stopped is exempt from the ladder's progress rule. The map
+# (0.45 m look-ahead, 3 cm cells) sees the riser well before STOP_DIST.
+MAX_FEASIBLE_RISE = 0.042        # m, between the feasible column's 4.0 cm and the high column's 4.5 cm
+STOP_DIST = 0.30                 # m ahead of the riser: target speed 0 from here (≈ 1.2 s at 0.25 m/s)
+STOP_LOOK = 0.6                  # m, how far the privileged profile looks for a riser
+STOP_SPEED_WEIGHT = -2.0         # cost = |v_xy| / 0.25 while stopping is due (≥ 0 → negative): 0.25 m/s costs 2/s
+
+# ── run 11c: the map under a worse sensor (docs §16) ────────────────────────
+# The sim ToF casts a zone's centre ray; the VL53L8CX integrates a 5.6° cone and mixes the targets
+# at an edge, and the real odometry is a guess. Train the map policy under a harder sensor model
+# than §14 measured so the real map (to be measured, docs §15 next-2) is inside the training set.
+TOF_MAP_CONE_RAYS = 4            # extra rays per zone; each frame reads a zone from a random one
+TOF_MAP_KWARGS_HARD = {**TOF_MAP_KWARGS, "cone_rays": TOF_MAP_CONE_RAYS,
+                       "noise_rel": 0.02, "noise_abs": 0.008, "dropout": 0.10,            # ×2 the sensor noise
+                       "odom_scale": 0.06, "odom_yaw_per_m_deg": 4.0, "odom_walk": 0.02,  # ×2 the drift
+                       "odom_z_per_m": 0.02}
+
+# ── run 11b: flights — tread DR + foot placement on the treads (docs §16) ────
+TREAD_DR_RANGE = (0.11, 0.24)    # m, microduck_terrains.STEP_UP_TREAD_RANGE (training only; play keeps 0.15)
+PLACEMENT_WEIGHT = 50.0          # 50·dt = 1.0 per well-placed touchdown inside a flight (≈ 4-6 per flight)
+PLACEMENT_MARGIN = 0.02          # m, the footprint grown by this must sit on one level
+PLACEMENT_MIN_STRIDE = 0.04      # m, from the same foot's previous touchdown
+
 
 def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
-                                   perception: str = "tof", clean_feet: bool = False):
+                                   perception: str = "tof", clean_feet: bool = False,
+                                   envelope: bool = False, map_dr: str = "nominal", tread_dr: bool = False):
     """``perception``: "tof" (the head sensor, 125-D actor) or "oracle" (an exact height scan
     around the feet, 61 + 133-D — perfect terrain memory, the bound on what a ToF-built height
     map could give). ``clean_feet``: price edge contact and falls, size the step-up stack in dt
-    units, promote on the ladder only for clean episodes."""
+    units, promote on the ladder only for clean episodes. Run 11 variants (each on top of run 10's
+    tof_map + clean_feet): ``envelope`` adds the too-high column and the stop objective (11a),
+    ``map_dr="hard"`` trains the map under the harder sensor model (11c), ``tread_dr`` randomises
+    the flights' tread and pays foot placement on the treads (11b)."""
     if perception not in ("tof", "oracle", "tof_map"):
         raise ValueError(f"perception must be 'tof', 'oracle' or 'tof_map', not {perception!r}")
+    if map_dr not in ("nominal", "hard"):
+        raise ValueError(f"map_dr must be 'nominal' or 'hard', not {map_dr!r}")
     cfg = make_microduck_walk_v2_terrain_env_cfg(
-        play=play, menu="step_up", finetune=True, v2=True, apex=True, stairs_mode=True,
+        play=play, menu="step_up_envelope" if envelope else "step_up", finetune=True, v2=True, apex=True,
+        stairs_mode=True,
     )
     cfg.episode_length_s = EPISODE_LENGTH_S
+    if tread_dr and not play:
+        # per-tile tread depth for the flights; the play grid keeps 15 cm so batteries stay comparable
+        cfg.scene.terrain.terrain_generator.sub_terrains["short_flight"].step_width_range = TREAD_DR_RANGE
 
     if perception == "tof":
         # The ToF in the scene, the frame in both obs groups (actor last → 125-D).
@@ -162,10 +199,11 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
     else:
         # tof_map: the same scan, but read from a map the ToF built (values + known mask → 61 + 266-D).
         # The critic keeps the exact scan: it never leaves the training box.
-        cfg.scene.sensors = tuple(cfg.scene.sensors) + (tof.make_tof_sensor_cfg(),)
+        map_kwargs = dict(TOF_MAP_KWARGS_HARD if map_dr == "hard" else TOF_MAP_KWARGS)
+        cfg.scene.sensors = tuple(cfg.scene.sensors) + (tof.make_tof_sensor_cfg(cone_rays=map_kwargs.get("cone_rays", 0)),)
         cfg.observations["actor"].terms["height_scan"] = ObservationTermCfg(
             func=tof_map_scan, params={**SCAN_PARAMS, "sensor_name": tof.TOF_SENSOR_NAME,
-                                       "map_kwargs": dict(TOF_MAP_KWARGS)},
+                                       "map_kwargs": map_kwargs},
         )
         cfg.observations["critic"].terms["height_scan_clean"] = ObservationTermCfg(
             func=microduck_mdp.terrain_height_scan, params={**SCAN_PARAMS, "noise": 0.0},
@@ -225,6 +263,29 @@ def make_microduck_step_up_env_cfg(play: bool = False, free_head: bool = False,
         cfg.rewards["fall"] = RewardTermCfg(func=mjlab_is_terminated, weight=FALL_WEIGHT, params={})
         if not play:
             cfg.curriculum["terrain_levels"].params["max_edge_steps"] = MAX_EDGE_STEPS
+
+    if envelope:
+        # 11a: zero velocity target + speed cost in front of a too-high riser; no climb pay on
+        # the high column; a stopped robot still climbs the ladder.
+        stop = {"max_rise": MAX_FEASIBLE_RISE, "stop_dist": STOP_DIST, "look": STOP_LOOK}
+        track = cfg.rewards["track_linear_velocity"]
+        track.func = microduck_mdp.track_linear_velocity_stop_gated
+        track.params = {"std": track.params["std"], "command_name": track.params["command_name"], **stop}
+        cfg.rewards["stop_before_high_step"] = RewardTermCfg(
+            func=microduck_mdp.stop_before_high_step, weight=STOP_SPEED_WEIGHT, params={**stop, "v_ref": 0.25},
+        )
+        cfg.rewards["height_progress"].params["skip_tile"] = "high_step"
+        cfg.rewards["foot_on_step"].params["skip_tile"] = "high_step"
+        if not play:
+            cfg.curriculum["terrain_levels"].params["progress_exempt_attr"] = "_stop_seen"
+
+    if tread_dr:
+        # 11b: a touchdown centred on a tread, mid-flight, with a real stride, pays once.
+        cfg.rewards["foot_placement"] = RewardTermCfg(
+            func=microduck_mdp.foot_placement_bonus, weight=PLACEMENT_WEIGHT,
+            params={"sensor_name": contact_sensor, "min_rise": FOOT_ON_STEP_MIN_RISE, "margin": PLACEMENT_MARGIN,
+                    "tol": EDGE_TOL, "min_stride": PLACEMENT_MIN_STRIDE},
+        )
     return cfg
 
 
@@ -243,3 +304,14 @@ MicroduckStepUpTofCleanRlCfg.run_name = "step_up_tof_clean"
 
 MicroduckStepUpTofMapCleanRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
 MicroduckStepUpTofMapCleanRlCfg.run_name = "step_up_tofmap_clean"
+
+# Run 11 (2026-11-03 night, all warm-started from run 10's model_3999, same 327-D obs):
+MicroduckStepUpTofMapEnvelopeRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpTofMapEnvelopeRlCfg.run_name = "step_up_tofmap_envelope"     # 11a
+
+MicroduckStepUpTofMapHardRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpTofMapHardRlCfg.run_name = "step_up_tofmap_hard"             # 11c
+
+MicroduckStepUpTofMapFlightsRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
+MicroduckStepUpTofMapFlightsRlCfg.run_name = "step_up_tofmap_flights"       # 11b
+

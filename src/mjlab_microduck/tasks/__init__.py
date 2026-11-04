@@ -59,6 +59,9 @@ from .microduck_step_up_env_cfg import (
     MicroduckStepUpOracleRlCfg,
     MicroduckStepUpTofCleanRlCfg,
     MicroduckStepUpTofMapCleanRlCfg,
+    MicroduckStepUpTofMapEnvelopeRlCfg,
+    MicroduckStepUpTofMapFlightsRlCfg,
+    MicroduckStepUpTofMapHardRlCfg,
     MicroduckStepUpRlCfg,
     make_microduck_step_up_env_cfg,
 )
@@ -256,6 +259,24 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
+# Run 11 (docs/step_up_perception.md §16), each = StepUp-TofMap-Clean + one lever:
+#   11a Envelope — the too-high column (4.5-6.5 cm) and the stop objective ("too high → stop");
+#   11c Hard     — the map built under a harder sensor model (cone-ray edge blur, ×2 noise and drift);
+#   11b Flights  — per-tile tread depth 11-24 cm and a foot-placement bonus on the treads.
+_RUN11 = {"free_head": True, "perception": "tof_map", "clean_feet": True}
+for _tid, _rl, _kw in (
+    ("Mjlab-StepUp-TofMap-Envelope-MicroDuck", MicroduckStepUpTofMapEnvelopeRlCfg, {"envelope": True}),
+    ("Mjlab-StepUp-TofMap-Hard-MicroDuck", MicroduckStepUpTofMapHardRlCfg, {"map_dr": "hard"}),
+    ("Mjlab-StepUp-TofMap-Flights-MicroDuck", MicroduckStepUpTofMapFlightsRlCfg, {"tread_dr": True}),
+):
+    register_mjlab_task(
+        task_id=_tid,
+        env_cfg=make_microduck_step_up_env_cfg(**_RUN11, **_kw),
+        play_env_cfg=make_microduck_step_up_env_cfg(play=True, **_RUN11, **_kw),
+        rl_cfg=_rl,
+        runner_cls=MicroduckOnPolicyRunner,
+    )
+
 # StepUp-Tof-FreeHead — the same skill with the head free to aim the sensor (run 7b).
 register_mjlab_task(
     task_id="Mjlab-StepUp-Tof-FreeHead-MicroDuck",
@@ -426,6 +447,9 @@ _BACKLASH_TASKS = (
     ("Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"perception": "oracle", "clean_feet": True}, MicroduckStepUpOracleRlCfg, _BL_WALK),
     ("Mjlab-StepUp-Tof-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof", "clean_feet": True}, MicroduckStepUpTofCleanRlCfg, _BL_WALK),
     ("Mjlab-StepUp-TofMap-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True}, MicroduckStepUpTofMapCleanRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Envelope-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True, "envelope": True}, MicroduckStepUpTofMapEnvelopeRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Hard-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True, "map_dr": "hard"}, MicroduckStepUpTofMapHardRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Flights-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True, "tread_dr": True}, MicroduckStepUpTofMapFlightsRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),

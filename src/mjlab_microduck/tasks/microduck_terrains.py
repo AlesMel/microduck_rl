@@ -157,6 +157,9 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
     """Risers (1 = a single step)."""
     approach_range: tuple[float, float] = (0.8, 1.6)
     """Flat run-up before the first riser, metres, drawn per tile."""
+    step_width_range: tuple[float, float] | None = None
+    """Run 11b: when set, the tread depth is drawn per tile from this range instead of
+    ``step_width`` (stride adaptation — run 10's flights were trained on 15 cm treads only)."""
     thickness: float = 0.5
 
     def step_height(self, difficulty: float) -> float:
@@ -165,7 +168,8 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
     def function(
         self, difficulty: float, spec: mujoco.MjSpec, rng: np.random.Generator
     ) -> TerrainOutput:
-        assert self.step_width >= 2 * FOOT_LENGTH
+        tread = float(rng.uniform(*self.step_width_range)) if self.step_width_range else self.step_width
+        assert tread >= 2 * FOOT_LENGTH, f"tread {tread} m must hold a {FOOT_LENGTH} m foot on one level"
         body = spec.body("terrain")
         h = self.step_height(difficulty)
         width = self.size[1]
@@ -173,8 +177,8 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
         segments: list[tuple[float, float, float]] = [(0.0, approach, 0.0)]
         x = approach
         for k in range(1, self.num_steps):
-            segments.append((x, x + self.step_width, k * h))
-            x += self.step_width
+            segments.append((x, x + tread, k * h))
+            x += tread
         segments.append((x, self.size[0], self.num_steps * h))
         assert self.size[0] - x >= 1.0, "top platform shorter than 1 m"
         geometries: list[TerrainGeometry] = []
@@ -324,20 +328,45 @@ def make_microduck_stairs_terrains_cfg(
 
 
 STEP_UP_HEIGHT_RANGE = (0.015, 0.040)   # m: from "the blind walk does this" to "a real stair for a duck"
+# Run 11a (the envelope): a single step the duck must NOT climb — "too high → stop". Run 10's clean
+# rate at 3.9 cm was 65 % with falls appearing; the band 4.0-4.5 cm is left out so the ToF map
+# (p95 error 1.1 cm) can tell the two columns apart.
+HIGH_STEP_HEIGHT_RANGE = (0.045, 0.065)
+# Run 11b (flights): tread depth drawn per tile, ≥ 2 foot lengths (0.108 m) up to a long tread.
+STEP_UP_TREAD_RANGE = (0.11, 0.24)
 
 
-def microduck_step_up_subterrains(scale: float = 1.0) -> dict[str, SubTerrainCfg]:
-    """Step-up skill menu: a single step, a short flight, one flat column (keeps flat walking alive)."""
+def microduck_step_up_subterrains(scale: float = 1.0, high_step: bool = False,
+                                  tread_range: tuple[float, float] | None = None) -> dict[str, SubTerrainCfg]:
+    """Step-up skill menu: a single step, a short flight, one flat column (keeps flat walking alive);
+    ``high_step`` adds the infeasible single step (run 11a); ``tread_range`` randomises the flight's
+    tread per tile (run 11b)."""
     heights = (STEP_UP_HEIGHT_RANGE[0] * scale, STEP_UP_HEIGHT_RANGE[1] * scale)
-    return {
+    subs: dict[str, SubTerrainCfg] = {
         "flat": terrain_gen.BoxFlatTerrainCfg(proportion=0.10),
         "single_step": BoxSingleStepTerrainCfg(proportion=0.50, step_height_range=heights, num_steps=1),
-        "short_flight": BoxSingleStepTerrainCfg(proportion=0.40, step_height_range=heights, num_steps=3),
+        "short_flight": BoxSingleStepTerrainCfg(proportion=0.40, step_height_range=heights, num_steps=3,
+                                                step_width_range=tread_range),
     }
+    if high_step:
+        subs["single_step"].proportion, subs["short_flight"].proportion = 0.40, 0.30
+        subs["high_step"] = BoxSingleStepTerrainCfg(
+            proportion=0.20, step_height_range=(HIGH_STEP_HEIGHT_RANGE[0] * scale, HIGH_STEP_HEIGHT_RANGE[1] * scale),
+            num_steps=1,
+        )
+    return subs
 
 
 def make_microduck_step_up_terrains_cfg(
-    num_rows: int = NUM_ROWS, scale: float = 1.0, seed: int | None = None, border_width: float = BORDER_WIDTH
+    num_rows: int = NUM_ROWS, scale: float = 1.0, seed: int | None = None, border_width: float = BORDER_WIDTH,
+    high_step: bool = False, tread_range: tuple[float, float] | None = None,
 ) -> TerrainGeneratorCfg:
     """Step-up curriculum grid for the microduck (rows = riser height 1.5 → 4 cm)."""
-    return _generator(microduck_step_up_subterrains(scale), num_rows, seed, border_width)
+    return _generator(microduck_step_up_subterrains(scale, high_step, tread_range), num_rows, seed, border_width)
+
+
+def make_microduck_step_up_envelope_terrains_cfg(
+    num_rows: int = NUM_ROWS, scale: float = 1.0, seed: int | None = None, border_width: float = BORDER_WIDTH
+) -> TerrainGeneratorCfg:
+    """Run 11a: the step-up grid plus the ``high_step`` column (4.5 → 6.5 cm, to be refused)."""
+    return make_microduck_step_up_terrains_cfg(num_rows, scale, seed, border_width, high_step=True)
