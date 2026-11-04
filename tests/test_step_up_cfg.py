@@ -67,15 +67,14 @@ def test_commands_point_into_the_step_and_head_down():
 
 
 def test_free_head_variant_loosens_only_the_head():
-    base = load_env_cfg("Mjlab-StepUp-Tof-Backlash-MicroDuck", play=False)
-    free = load_env_cfg("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck", play=False)
+    # run 7b's cfg (its task id is retired; the flag is what runs 9-11 build on)
+    base = su.make_microduck_step_up_env_cfg()
+    free = su.make_microduck_step_up_env_cfg(free_head=True)
     assert free.rewards["head_pose_tracking"].weight == su.FREE_HEAD_TRACK_WEIGHT < base.rewards["head_pose_tracking"].weight
     assert free.rewards["head_pose_tracking"].params["std"] == su.FREE_HEAD_TRACK_STD > su.HEAD_TRACK_STD
     assert free.commands["head_pose"].ranges == base.commands["head_pose"].ranges        # the prior stays
     for k in ("height_progress", "foot_on_step", "swing_apex", "torque_headroom"):
         assert free.rewards[k].weight == base.rewards[k].weight
-    assert load_rl_cfg("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck").run_name == "step_up_tof_freehead"
-    assert load_rl_cfg("Mjlab-StepUp-Tof-FreeHead-Backlash-MicroDuck").experiment_name == "step_up"
 
 
 def test_backlash_twin_uses_backlash_model():

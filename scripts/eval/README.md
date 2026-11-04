@@ -67,3 +67,23 @@ uv run scripts/eval/render_ckpt.py MODEL.pt out.mp4 [--task Mjlab-WalkV2-Rough-B
 50 fps, camera following the trunk, through a fixed schedule: stand, walk 0.1-0.5 m/s,
 stop, backward 0.3, sideways 0.2, turn 1.0 rad/s, stand. The overlay shows the command and
 the measured forward speed; a per-segment summary is printed at the end.
+
+## Stairs and the step-up skill (walk v2 terrain line, `docs/step_up_perception.md`)
+
+The default task of these is a step-up task; all take `--checkpoint` / `--task` / `--device cuda`.
+
+- **stairs_feasibility.py** — quasi-static torque budget of a step-up: what the knee needs per
+  riser height vs the XL330 cap, from a blind stairs checkpoint (run 3). The "why perception" number.
+- **step_up_eval.py** — per-row on-top / fell table with the ToF-blind ablation (runs 6-7b).
+  Superseded by `step_up_failures.py`; kept for the numbers quoted in the design doc.
+- **step_up_failures.py** — the clean-climb test: 384 robots, per riser height, WHY a robot
+  stumbles (toe catch, edge landing, blind gap, slowdown, fall context); `--riser-range LO HI`
+  puts other single-step heights on the grid (where clean climbing ends); on a `high_step` tile
+  reports `stopped`. JSON: `rows[]` per robot.
+- **tof_map_quality.py** — the ToF-built height map vs the exact terrain while approaching a
+  riser (coverage, height error, edge placement), per sensor/odometry model.
+
+Related, one level up: `scripts/view_terrain_env.py` (interactive viewer / headless video of a
+policy on the terrain grid, `build_env` helper the tests above use) and `scripts/render_showcase.py`
+(showcase and side-by-side comparison videos with the policy's perception drawn in).
+

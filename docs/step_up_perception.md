@@ -324,7 +324,7 @@ Checkpoint: `logs/rsl_rl/step_up/2026-11-03_20-30-50_step_up_tofmap_clean/model_
 
 Three runs on run 10's checkpoint (`model_3999`, same 327-D obs, `MICRODUCK_WARM_START=1`), one
 after the other on the 12 GB box (`scripts/run11/chain.sh`, 2048 envs × 4000 it each, a battery
-after each; `scripts/run11/smoke.sh` first). Order by value: 11a → 11c → 11b. Each is run 10 plus
+after each; a 64-env × 5-it smoke of each task first). Order by value: 11a → 11c → 11b. Each is run 10 plus
 ONE lever, so the batteries read against `failures_10.json` directly.
 
 **11a `Mjlab-StepUp-TofMap-Envelope-*` — "too high → stop".** The requirement (§11) has two

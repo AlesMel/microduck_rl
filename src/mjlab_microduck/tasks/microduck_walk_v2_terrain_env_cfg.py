@@ -6,7 +6,7 @@ obs noise and delays, the 61D actor contract, the rough-terrain solver settings 
 curriculum — with the base rough mix replaced by one of the duck-scaled menus in
 ``microduck_terrains.py``:
 
-  * ``menu="isaaclab"`` (Mjlab-WalkV2-Terrain-MicroDuck): flat, rubble, random grid, pyramid
+  * ``menu="isaaclab"`` (no registered task since 2026-11-04): flat, rubble, random grid, pyramid
     stairs up and down, straight small steps, pyramid slopes — one column each, NUM_ROWS
     difficulty rows, robots start on row 0 and climb when they cover half a tile.
   * ``menu="stairs"`` (Mjlab-WalkV2-Stairs-MicroDuck): straight small steps + pyramid stairs.
@@ -141,7 +141,7 @@ model_2999) is the stairs policy to keep: highest apex, best row 2.
 Preview the terrain with the robot standing on it, and check that every spawn is a stable
 stance, with::
 
-    uv run mjpython scripts/view_terrain_env.py --task Mjlab-WalkV2-Terrain-MicroDuck --settle
+    uv run mjpython scripts/view_terrain_env.py --task Mjlab-WalkV2-Stairs-MicroDuck --settle
 """
 from copy import deepcopy
 
@@ -285,26 +285,15 @@ def make_microduck_walk_v2_terrain_env_cfg(play: bool = False, menu: str = "isaa
     return cfg
 
 
-MicroduckWalkV2TerrainRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2RlCfg)
-MicroduckWalkV2TerrainRlCfg.experiment_name = "walk_v2_terrain"
-MicroduckWalkV2TerrainRlCfg.run_name = "walk_v2_terrain"
-
 MicroduckWalkV2StairsRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2RlCfg)
 MicroduckWalkV2StairsRlCfg.experiment_name = "walk_v2_stairs"
 MicroduckWalkV2StairsRlCfg.run_name = "walk_v2_stairs"
 
+# Warm-start base (runs 1-3 trained under it as -Stairs-Finetune-/-StairsV2-; those task ids are
+# retired, the cfg stays as the parent of stairs mode and the step-up runner cfgs).
 MicroduckWalkV2StairsFinetuneRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsRlCfg)
 MicroduckWalkV2StairsFinetuneRlCfg.run_name = "walk_v2_stairs_ft"
 MicroduckWalkV2StairsFinetuneRlCfg.max_iterations = FINETUNE_MAX_ITERATIONS
 
-MicroduckWalkV2StairsV2RlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
-MicroduckWalkV2StairsV2RlCfg.run_name = "walk_v2_stairs_v2"
-
-MicroduckWalkV2StairsApexRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
-MicroduckWalkV2StairsApexRlCfg.run_name = "walk_v2_stairs_apex"
-
 MicroduckWalkV2StairsModeRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
 MicroduckWalkV2StairsModeRlCfg.run_name = "walk_v2_stairs_mode"
-
-MicroduckWalkV2StairsModeHRRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFinetuneRlCfg)
-MicroduckWalkV2StairsModeHRRlCfg.run_name = "walk_v2_stairs_mode_hr"

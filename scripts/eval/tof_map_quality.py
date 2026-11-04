@@ -36,7 +36,7 @@ from mjlab_microduck.tasks import microduck_step_up_env_cfg as su  # noqa: E402
 from mjlab_microduck.tasks import tof  # noqa: E402
 from mjlab_microduck.tasks.tof_map import TofHeightMap  # noqa: E402
 
-TASK = "Mjlab-StepUp-Tof-Clean-Backlash-MicroDuck"
+TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"   # any 125-D ToF checkpoint (run 9's loads here too)
 VARIANTS = {}  # filled in run() from --fuse / --splat-y
 _BASE = {
     "ideal": dict(noise_rel=0.0, noise_abs=0.0, dropout=0.0, odom_scale=0.0, odom_yaw_per_m_deg=0.0, odom_walk=0.0, odom_z_per_m=0.0),

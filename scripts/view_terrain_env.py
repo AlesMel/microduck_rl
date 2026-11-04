@@ -50,7 +50,7 @@ from mjlab.tasks.registry import load_env_cfg
 sys.path.insert(0, str(Path(__file__).parent / "eval"))
 from _common import command_obs, load_policy
 
-DEFAULT_TASK = "Mjlab-WalkV2-Terrain-MicroDuck"
+DEFAULT_TASK = "Mjlab-WalkV2-Stairs-MicroDuck"
 NUM_ACTIONS = 14
 STAIRS = "straight_stairs"
 STEP_TILES = (STAIRS, "single_step", "short_flight")   # tiles with a step profile worth a side camera

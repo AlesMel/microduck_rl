@@ -293,14 +293,8 @@ MicroduckStepUpRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckWalkV2StairsFin
 MicroduckStepUpRlCfg.experiment_name = "step_up"
 MicroduckStepUpRlCfg.run_name = "step_up_tof"
 
-MicroduckStepUpFreeHeadRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
-MicroduckStepUpFreeHeadRlCfg.run_name = "step_up_tof_freehead"
-
 MicroduckStepUpOracleRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
 MicroduckStepUpOracleRlCfg.run_name = "step_up_oracle_clean"
-
-MicroduckStepUpTofCleanRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
-MicroduckStepUpTofCleanRlCfg.run_name = "step_up_tof_clean"
 
 MicroduckStepUpTofMapCleanRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStepUpRlCfg)
 MicroduckStepUpTofMapCleanRlCfg.run_name = "step_up_tofmap_clean"

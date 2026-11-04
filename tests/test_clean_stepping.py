@@ -189,16 +189,15 @@ def test_oracle_cfg(task):
     assert "foot_edge_contact" not in tof_cfg.rewards and tof_cfg.rewards["height_progress"].weight == su.PROGRESS_WEIGHT
 
 
-@pytest.mark.parametrize("task", ("Mjlab-StepUp-Tof-Clean-MicroDuck", "Mjlab-StepUp-Tof-Clean-Backlash-MicroDuck"))
-def test_tof_clean_differs_from_the_oracle_only_in_perception(task):
-    cfg = load_env_cfg(task, play=False)
-    oracle = load_env_cfg(task.replace("Tof-Clean", "Oracle-Clean"), play=False)
+def test_tof_clean_differs_from_the_oracle_only_in_perception():
+    # run 9's cfg (task id retired 2026-11-04): the oracle's objective with the ToF frame as perception
+    cfg = su.make_microduck_step_up_env_cfg(free_head=True, perception="tof", clean_feet=True)
+    oracle = load_env_cfg("Mjlab-StepUp-Oracle-Clean-MicroDuck", play=False)
     for k in ("height_progress", "foot_on_step", "foot_edge_contact", "fall", "trunk_impact", "swing_apex", "torque_headroom"):
         assert cfg.rewards[k].weight == oracle.rewards[k].weight, k
     assert cfg.curriculum["terrain_levels"].params["max_edge_steps"] == su.MAX_EDGE_STEPS
     assert list(cfg.observations["actor"].terms)[-1] == "tof" and "height_scan" not in cfg.observations["actor"].terms
     assert cfg.rewards["head_pose_tracking"].weight == su.FREE_HEAD_TRACK_WEIGHT        # the free head of run 7b
-    assert load_rl_cfg(task).run_name == "step_up_tof_clean"
 
 
 
