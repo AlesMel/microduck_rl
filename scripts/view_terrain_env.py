@@ -113,6 +113,8 @@ class WalkPolicy:
             self.session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
             self.in_name = self.session.get_inputs()[0].name
             self.out_name = self.session.get_outputs()[0].name
+            w = self.session.get_inputs()[0].shape[-1]
+            self.in_width = w if isinstance(w, int) else None   # a 61-D policy on a wider (perceptive) task
             self.policy = None
         else:
             self.session, self.policy = None, load_policy(path, device=device)
@@ -123,6 +125,8 @@ class WalkPolicy:
             return self.policy(o)
         # Published ONNX files are exported with a fixed batch of 1: one run per robot.
         x = o.cpu().numpy().astype(np.float32)
+        if self.in_width is not None:
+            x = x[:, :self.in_width]                            # the shared 61-D prefix; extra perception dropped
         a = np.concatenate([self.session.run([self.out_name], {self.in_name: x[i:i + 1]})[0] for i in range(x.shape[0])])
         return torch.as_tensor(a, device=o.device)
 

@@ -1,0 +1,297 @@
+{
+ "width": 1920,
+ "height": 1080,
+ "items": [
+  {
+   "type": "card",
+   "kind": "title",
+   "seconds": 3.5,
+   "music": 0,
+   "lines": [
+    "learning to climb steps",
+    "25 cm tall · 14 servos · one depth sensor in its head"
+   ]
+  },
+  {
+   "type": "card",
+   "kind": "text",
+   "seconds": 3.2,
+   "music": 0,
+   "lines": [
+    "Same step. Same start.",
+    "left: the original walking policy, blind  ·  right: the new policy, which maps the ground with its ToF sensor"
+   ]
+  },
+  {
+   "type": "split",
+   "left": "mk/alpha_walking_lo.npz",
+   "right": "mk/now_lo.npz",
+   "hero": 62,
+   "center": "climb",
+   "pre": 2.5,
+   "post": 2.4,
+   "cam": {
+    "az": [
+     44,
+     60
+    ],
+    "el": [
+     -13,
+     -10
+    ],
+    "dist": [
+     0.85,
+     0.76
+    ],
+    "ahead": 0.12
+   },
+   "height": "3.1 cm",
+   "music": 1,
+   "left_label": "BEFORE",
+   "left_sub": "original walking policy, no sensor",
+   "right_label": "NOW",
+   "right_sub": "maps the ground first",
+   "left_perception": false,
+   "align": true,
+   "center_left": "edge"
+  },
+  {
+   "type": "clip",
+   "states": "mk/now_lo.npz",
+   "hero": 62,
+   "center": "climb",
+   "pre": 1.0,
+   "post": 1.9,
+   "cam": {
+    "az": [
+     138,
+     150
+    ],
+    "el": [
+     -14,
+     -11
+    ],
+    "dist": [
+     0.78,
+     0.7
+    ],
+    "ahead": 0.04
+   },
+   "music": 1,
+   "beams": false
+  },
+  {
+   "type": "split",
+   "left": "mk/alpha_walking_lo.npz",
+   "right": "mk/now_lo.npz",
+   "hero": 23,
+   "center": "climb",
+   "pre": 1.4,
+   "post": 3.0,
+   "cam": {
+    "az": [
+     44,
+     60
+    ],
+    "el": [
+     -13,
+     -10
+    ],
+    "dist": [
+     0.85,
+     0.76
+    ],
+    "ahead": 0.12
+   },
+   "height": "4.6 cm",
+   "music": 2,
+   "left_label": "BEFORE",
+   "left_sub": "original walking policy, no sensor",
+   "right_label": "NOW",
+   "right_sub": "maps the ground first",
+   "left_perception": false,
+   "align": true,
+   "center_left": "edge"
+  },
+  {
+   "type": "clip",
+   "states": "mk/now_lo.npz",
+   "hero": 23,
+   "center": "climb",
+   "pre": 1.0,
+   "post": 1.9,
+   "cam": {
+    "az": [
+     222,
+     210
+    ],
+    "el": [
+     -14,
+     -11
+    ],
+    "dist": [
+     0.78,
+     0.7
+    ],
+    "ahead": 0.04
+   },
+   "music": 2,
+   "beams": false
+  },
+  {
+   "type": "split",
+   "left": "mk/alpha_walking_hi.npz",
+   "right": "mk/now_hi.npz",
+   "hero": 62,
+   "center": "climb",
+   "pre": 2.4,
+   "post": 2.6,
+   "cam": {
+    "az": [
+     44,
+     60
+    ],
+    "el": [
+     -13,
+     -10
+    ],
+    "dist": [
+     0.85,
+     0.76
+    ],
+    "ahead": 0.12
+   },
+   "height": "6.4 cm",
+   "music": 3,
+   "left_label": "BEFORE",
+   "left_sub": "original walking policy, no sensor",
+   "right_label": "NOW",
+   "right_sub": "maps the ground first",
+   "left_perception": false,
+   "align": true,
+   "center_left": "edge"
+  },
+  {
+   "type": "clip",
+   "states": "mk/now_hi.npz",
+   "hero": 62,
+   "center": "climb",
+   "pre": 1.0,
+   "post": 1.9,
+   "cam": {
+    "az": [
+     140,
+     152
+    ],
+    "el": [
+     -14,
+     -11
+    ],
+    "dist": [
+     0.75,
+     0.68
+    ],
+    "ahead": 0.04
+   },
+   "music": 3,
+   "beams": false
+  },
+  {
+   "type": "split",
+   "left": "mk/alpha_walking_hi.npz",
+   "right": "mk/now_hi.npz",
+   "hero": 29,
+   "center": "climb",
+   "pre": 1.4,
+   "post": 3.0,
+   "slow": [
+    -0.5,
+    0.4,
+    0.5
+   ],
+   "cam": {
+    "az": [
+     44,
+     60
+    ],
+    "el": [
+     -12,
+     -9
+    ],
+    "dist": [
+     0.82,
+     0.74
+    ],
+    "ahead": 0.12
+   },
+   "height": "7.7 cm",
+   "music": 4,
+   "left_label": "BEFORE",
+   "left_sub": "original walking policy, no sensor",
+   "right_label": "NOW",
+   "right_sub": "maps the ground first",
+   "left_perception": false,
+   "align": true,
+   "center_left": "edge"
+  },
+  {
+   "type": "clip",
+   "states": "mk/now_hi.npz",
+   "hero": 29,
+   "center": "climb",
+   "pre": 1.0,
+   "post": 2.2,
+   "slow": [
+    -0.5,
+    0.5,
+    0.4
+   ],
+   "cam": {
+    "az": [
+     218,
+     204
+    ],
+    "el": [
+     -11,
+     -8
+    ],
+    "dist": [
+     0.72,
+     0.64
+    ],
+    "ahead": 0.04
+   },
+   "music": 4,
+   "badge": "7.7 cm",
+   "badge_sub": "nearly a third of its height",
+   "beams": false
+  },
+  {
+   "type": "card",
+   "kind": "end",
+   "seconds": 6.0,
+   "music": 1,
+   "lines": [
+    "Sees the step. Maps it. Steps over.",
+    "126 paired starts on single steps of 2.4–7.7 cm, same start for both; each split shows each robot reaching its step",
+    "Simulation footage  ·  trained with reinforcement learning (mjlab on MuJoCo Warp)"
+   ],
+   "stats": [
+    {
+     "value": "0 %",
+     "label": "clean climbs\noriginal walk",
+     "color": "bad"
+    },
+    {
+     "value": "79 %",
+     "label": "clean climbs\nnew policy",
+     "color": "good"
+    },
+    {
+     "value": "99 / 7",
+     "label": "falls\noriginal / new"
+    }
+   ]
+  }
+ ]
+}
