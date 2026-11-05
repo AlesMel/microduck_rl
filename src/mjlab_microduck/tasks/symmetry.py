@@ -110,6 +110,75 @@ def _get_tensors(
     return _cache[device]
 
 
+OBS_DIM = len(_OBS_PERM)          # 61: the family contract
+TOF_BLOCK = 64                    # an appended 8×8 ToF frame (tasks/tof.py), wire order
+
+
+_layout_cache: dict[int, list] = {}
+
+
+def _actor_layout(env) -> list | None:
+    """The actor terms past the 61-D contract, as (offset, width, kind) read off the env's
+    observation manager: ("tof",) for an 8×8 ToF frame, ("grid", nx, ny) for an oracle height
+    scan (x-major, y mirrored). None when there is no env to read (then only ToF tails work)."""
+    base = getattr(env, "unwrapped", env)
+    om = getattr(base, "observation_manager", None)
+    if om is None:
+        return None
+    key = id(om)
+    if key not in _layout_cache:
+        segs, off = [], 0
+        for name, dim, cfg in zip(om._group_obs_term_names["actor"], om._group_obs_term_dim["actor"],
+                                  om._group_obs_term_cfgs["actor"]):
+            width = 1
+            for d in dim:
+                width *= int(d)
+            if off >= OBS_DIM:
+                if hasattr(cfg.func, "mirror_layout"):
+                    segs.append((off, width, tuple(cfg.func.mirror_layout)))
+                elif "tof" in name and width == TOF_BLOCK:
+                    segs.append((off, width, ("tof",)))
+                elif getattr(cfg.func, "__name__", "") == "terrain_height_scan":
+                    from mjlab_microduck.tasks.mdp import scan_grid
+                    p = cfg.params
+                    xs, ys = scan_grid(p["x_range"], p["y_range"], p["res"])
+                    assert abs(p["y_range"][0] + p["y_range"][1]) < 1e-9, "the scan must be symmetric in y to mirror"
+                    segs.append((off, width, ("grid", len(xs), len(ys))))
+                else:
+                    raise ValueError(f"symmetry: no mirror rule for actor term {name!r} past the 61-D contract")
+            off += width
+        _layout_cache[key] = segs
+    return _layout_cache[key]
+
+
+def mirror_actor_obs(actor: torch.Tensor, obs_perm: torch.Tensor, obs_sign: torch.Tensor,
+                     layout: list | None = None) -> torch.Tensor:
+    """Mirror a [B, 61] actor obs with the table; any tail of whole 8×8 ToF blocks is mirrored
+    by flipping the COLUMNS of every row (column 0 is the sensor's left, so left ↔ right).
+    The sensor sits 2.2 cm left of the head midline, so this is an approximation at the
+    centimetre level — fine for augmentation, which is where the mirror is used."""
+    head = actor[:, :OBS_DIM][:, obs_perm] * obs_sign
+    tail = actor[:, OBS_DIM:]
+    if tail.shape[1] == 0:
+        return head
+    if layout:
+        parts = [head]
+        for off, width, kind in layout:
+            seg = actor[:, off:off + width]
+            if kind[0] == "tof":
+                seg = seg.reshape(-1, 8, 8).flip(-1).reshape(seg.shape[0], -1)
+            else:                                   # ("grid", nx, ny[, channels]): mirror y in every channel
+                ch = kind[3] if len(kind) > 3 else 1
+                seg = seg.reshape(-1, ch, kind[1], kind[2]).flip(-1).reshape(seg.shape[0], -1)
+            parts.append(seg)
+        return torch.cat(parts, dim=1)
+    if tail.shape[1] % TOF_BLOCK != 0:
+        raise ValueError(f"actor obs {actor.shape[1]}-D: the tail past {OBS_DIM} is not whole ToF blocks")
+    k = tail.shape[1] // TOF_BLOCK
+    tail_sym = tail.reshape(-1, k, 8, 8).flip(-1).reshape(tail.shape[0], -1)
+    return torch.cat([head, tail_sym], dim=1)
+
+
 # ---------------------------------------------------------------------------
 # Public augmentation function
 # ---------------------------------------------------------------------------
@@ -141,9 +210,9 @@ def microduck_vel_symmetry(
     aug_actions: torch.Tensor | None = None
 
     if obs is not None:
-        actor_orig: torch.Tensor = obs["actor"]  # [B, 51]
+        actor_orig: torch.Tensor = obs["actor"]  # [B, 61] or [B, 61 + k·64] (perceptive envs)
         obs_perm, obs_sign, _, _ = _get_tensors(actor_orig.device)
-        actor_sym = actor_orig[:, obs_perm] * obs_sign
+        actor_sym = mirror_actor_obs(actor_orig, obs_perm, obs_sign, _actor_layout(env))
 
         critic_orig: torch.Tensor = obs["critic"]
         # Critic obs mirroring is not implemented (not needed for use_mirror_loss).

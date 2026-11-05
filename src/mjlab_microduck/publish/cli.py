@@ -12,7 +12,7 @@
 
 Either way the repo gets `policy.onnx`, a schema-2 `manifest.json` and a README (plus `replay.mp4`
 when given `--video`, which the Hub's replay widget shows), the file is
-checked for the 61 -> 14 shape and smoke-run before anything is uploaded, and an existing
+checked for the 61 -> 14 (blind) or 125 -> 14 (tof8x8, read off the graph) shape and smoke-run before anything is uploaded, and an existing
 `policy.onnx` is not overwritten without `--force`. `--dry-run` writes the repo contents to a
 local directory and stops.
 """
@@ -190,7 +190,12 @@ def run(cfg: PublishConfig) -> int:
     try:
         onnx_path, training = _resolve_weights(cfg, workdir)
         shape = m.check_onnx(onnx_path)
-        print(f"[publish] {onnx_path.name}: {shape.obs_len} -> {shape.action_len}, ok")
+        # What the network reads is read off its graph, as the daemon does; a task id is
+        # cross-checked so an export from the wrong task cannot be published under its name.
+        perception = m.perception_of_width(shape.obs_len)
+        if cfg.task and (expected := m.perception_of_task(cfg.task)) != perception:
+            _fail(f"{onnx_path.name} is a {perception} network ({shape.obs_len}-D) but {cfg.task} trains {expected}")
+        print(f"[publish] {onnx_path.name}: {shape.obs_len} -> {shape.action_len}, perception {perception}, ok")
         if cfg.smoke:
             m.smoke_run_onnx(onnx_path)
             print("[publish] smoke run: finite, non-constant output")
@@ -212,6 +217,7 @@ def run(cfg: PublishConfig) -> int:
             slot=cfg.slot,
             command_help=command_help,
             training=training,
+            perception=perception,
         )
         m.validate_manifest(manifest)
 

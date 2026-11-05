@@ -38,9 +38,28 @@ from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
     MicroduckVelStandRlCfg,
 )
+from .microduck_walk_v2_env_cfg import (
+    make_microduck_walk_v2_env_cfg,
+    MicroduckWalkV2RlCfg,
+)
+from .microduck_walk_v2_terrain_env_cfg import (
+    make_microduck_walk_v2_terrain_env_cfg,
+    MicroduckWalkV2StairsRlCfg,
+    MicroduckWalkV2StairsModeRlCfg,
+    MODE_HEADROOM_WEIGHT_HR,
+)
 from .microduck_ground_pick_env_cfg import (
     make_microduck_ground_pick_env_cfg,
     MicroduckGroundPickRlCfg,
+)
+from .microduck_step_up_env_cfg import (
+    MicroduckStepUpOracleRlCfg,
+    MicroduckStepUpTofMapCleanRlCfg,
+    MicroduckStepUpTofMapEnvelopeRlCfg,
+    MicroduckStepUpTofMapFlightsRlCfg,
+    MicroduckStepUpTofMapHardRlCfg,
+    MicroduckStepUpRlCfg,
+    make_microduck_step_up_env_cfg,
 )
 from .microduck_ball_kick_env_cfg import (
     make_microduck_ball_kick_env_cfg,
@@ -113,6 +132,96 @@ register_mjlab_task(
     rl_cfg=MicroduckVelStandRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
+
+# WalkV2 — the walking gait retrained from scratch, fast and straight (no BC, mirror loss on).
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-Flat-MicroDuck",
+    env_cfg=make_microduck_walk_v2_env_cfg(),
+    play_env_cfg=make_microduck_walk_v2_env_cfg(play=True),
+    rl_cfg=MicroduckWalkV2RlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-Rough-MicroDuck",
+    env_cfg=make_microduck_walk_v2_env_cfg(rough=True),
+    play_env_cfg=make_microduck_walk_v2_env_cfg(play=True, rough=True),
+    rl_cfg=MicroduckWalkV2RlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# WalkV2 on the duck-scaled terrain grid (microduck_terrains.py): the stairs-only menu (straight
+# small steps + pyramids), untrained — the base env for the viewer, the sensor tests and the
+# feasibility script. The terrain line that led to the step-up skill (docstring of
+# microduck_walk_v2_terrain_env_cfg.py, runs 1-5) was retired from the registry on 2026-11-04:
+# -Terrain- (isaaclab menu), -Stairs-Finetune-, -StairsV2-Finetune-, -StairsApex-Finetune-,
+# -StairsModeHR-Finetune-, and the step-up ablations -StepUp-Tof-FreeHead- (run 7b) and
+# -StepUp-Tof-Clean- (run 9). Their cfgs are one factory call away (the flags remain); their
+# checkpoints load from the commit that registered them (d2f5a69d and before).
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-Stairs-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs"),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs"),
+    rl_cfg=MicroduckWalkV2StairsRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StairsMode — the slow rough-ground walk: vx ≤ 0.3, apex reward, torque headroom (run 4).
+register_mjlab_task(
+    task_id="Mjlab-WalkV2-StairsMode-Finetune-MicroDuck",
+    env_cfg=make_microduck_walk_v2_terrain_env_cfg(menu="stairs", finetune=True, v2=True, apex=True, stairs_mode=True),
+    play_env_cfg=make_microduck_walk_v2_terrain_env_cfg(play=True, menu="stairs", apex=True, stairs_mode=True),
+    rl_cfg=MicroduckWalkV2StairsModeRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StepUp-Tof — the perceptive step-up skill: stairs mode + the head ToF (125-D actor obs).
+register_mjlab_task(
+    task_id="Mjlab-StepUp-Tof-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True),
+    rl_cfg=MicroduckStepUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StepUp-Oracle-Clean — exact height scan around the feet + clean-stepping objective (run 8):
+# bounds what perfect terrain memory could give before a ToF height map is built.
+register_mjlab_task(
+    task_id="Mjlab-StepUp-Oracle-Clean-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(perception="oracle", clean_feet=True),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True, perception="oracle", clean_feet=True),
+    rl_cfg=MicroduckStepUpOracleRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# StepUp-TofMap-Clean — run 10: the deployable step-up. The oracle's scan, but read from a height
+# map built ONLY from the head ToF and drifting odometry (+ its known-mask); critic keeps the
+# exact scan. Warm-started from run 8 (same scan layout).
+register_mjlab_task(
+    task_id="Mjlab-StepUp-TofMap-Clean-MicroDuck",
+    env_cfg=make_microduck_step_up_env_cfg(free_head=True, perception="tof_map", clean_feet=True),
+    play_env_cfg=make_microduck_step_up_env_cfg(play=True, free_head=True, perception="tof_map", clean_feet=True),
+    rl_cfg=MicroduckStepUpTofMapCleanRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Run 11 (docs/step_up_perception.md §16), each = StepUp-TofMap-Clean + one lever:
+#   11a Envelope — the too-high column (4.5-6.5 cm) and the stop objective ("too high → stop");
+#   11c Hard     — the map built under a harder sensor model (cone-ray edge blur, ×2 noise and drift);
+#   11b Flights  — per-tile tread depth 11-24 cm and a foot-placement bonus on the treads.
+_RUN11 = {"free_head": True, "perception": "tof_map", "clean_feet": True}
+for _tid, _rl, _kw in (
+    ("Mjlab-StepUp-TofMap-Envelope-MicroDuck", MicroduckStepUpTofMapEnvelopeRlCfg, {"envelope": True}),
+    ("Mjlab-StepUp-TofMap-Hard-MicroDuck", MicroduckStepUpTofMapHardRlCfg, {"map_dr": "hard"}),
+    ("Mjlab-StepUp-TofMap-Flights-MicroDuck", MicroduckStepUpTofMapFlightsRlCfg, {"tread_dr": True}),
+):
+    register_mjlab_task(
+        task_id=_tid,
+        env_cfg=make_microduck_step_up_env_cfg(**_RUN11, **_kw),
+        play_env_cfg=make_microduck_step_up_env_cfg(play=True, **_RUN11, **_kw),
+        rl_cfg=_rl,
+        runner_cls=MicroduckOnPolicyRunner,
+    )
 
 # Stand-up task — robot starts inverted (lying on back) and must stand up
 register_mjlab_task(
@@ -261,6 +370,16 @@ _BACKLASH_TASKS = (
     ("Mjlab-Velocity-Rough-Backlash-MicroDuck", make_microduck_velocity_env_cfg, {"rough": True}, MicroduckRlCfg, _BL_WALK),
     ("Mjlab-VelStand-Flat-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
     ("Mjlab-VelStand-Rough-Backlash-MicroDuck", make_microduck_velstand_env_cfg, {"rough": True}, MicroduckVelStandRlCfg, _BL_ALLCOLLISIONS),
+    ("Mjlab-WalkV2-Flat-Backlash-MicroDuck", make_microduck_walk_v2_env_cfg, {}, MicroduckWalkV2RlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-Rough-Backlash-MicroDuck", make_microduck_walk_v2_env_cfg, {"rough": True}, MicroduckWalkV2RlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-Stairs-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs"}, MicroduckWalkV2StairsRlCfg, _BL_WALK),
+    ("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True}, MicroduckWalkV2StairsModeRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-Tof-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {}, MicroduckStepUpRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"perception": "oracle", "clean_feet": True}, MicroduckStepUpOracleRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Clean-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True}, MicroduckStepUpTofMapCleanRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Envelope-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True, "envelope": True}, MicroduckStepUpTofMapEnvelopeRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Hard-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True, "map_dr": "hard"}, MicroduckStepUpTofMapHardRlCfg, _BL_WALK),
+    ("Mjlab-StepUp-TofMap-Flights-Backlash-MicroDuck", make_microduck_step_up_env_cfg, {"free_head": True, "perception": "tof_map", "clean_feet": True, "tread_dr": True}, MicroduckStepUpTofMapFlightsRlCfg, _BL_WALK),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),

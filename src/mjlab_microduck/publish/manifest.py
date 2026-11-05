@@ -25,6 +25,12 @@ SCHEMA_VERSION = 2
 MODEL_API = 1
 OBS_LEN = 61
 ACTION_LEN = 14
+# Perception (manifest axis `perception`, docs/policy-manifest.md in the `microduck` repo): what the
+# network reads besides the robot's own state. `tof8x8` = the 61 above, bit-identical, then the
+# head ToF's 64 zones (tasks/tof.py is the sim side of that contract). The daemon reads which
+# kind a network is off its `obs` input, so the ONNX width is the ground truth here too.
+PERCEPTIONS: dict[str, int] = {"none": OBS_LEN, "tof8x8": OBS_LEN + 64}
+MODEL_API_PERCEPTIVE = 3   # a daemon that cannot feed the frame refuses at fetch, not at load
 ROBOT: dict[str, Any] = {"model": "microduck", "hw_rev": 1, "servos": "xl330", "control_hz": 50}
 
 # The one `.onnx` a repo carries. The daemon takes the sole `.onnx` in a repo and refuses several.
@@ -38,6 +44,28 @@ Kind = Literal["episodic", "perpetual"]
 KINDS: tuple[str, ...] = ("episodic", "perpetual")
 
 ZERO_TWIST: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+def perception_of_width(obs_len: int) -> str:
+    """The perception an observation width implies (what the daemon reads off the graph)."""
+    for name, width in PERCEPTIONS.items():
+        if width == obs_len:
+            return name
+    raise ManifestError(
+        f"observation width {obs_len}: the robot builds {OBS_LEN} (blind) or {PERCEPTIONS['tof8x8']} "
+        "(tof8x8); a 51-D policy is the legacy 3-value-command family, which the daemon refuses"
+    )
+
+
+def perception_of_task(task_id: str) -> str:
+    """The perception a registered task trains: `tof8x8` when its actor observation carries the
+    head ToF term, else `none`. Read off the env cfg, so nothing has to be remembered at publish."""
+    import mjlab.tasks  # noqa: F401  (populates the registry)
+    import mjlab_microduck.tasks  # noqa: F401
+    from mjlab.tasks.registry import load_env_cfg
+
+    terms = load_env_cfg(task_id, play=True).observations["actor"].terms
+    return "tof8x8" if "tof" in terms else "none"
 
 # The daemon's policy slots, for a gait's `slot` hint (display-only: `robotctl policy load <slot>`).
 SLOTS: tuple[str, ...] = ("walk", "stand", "sitstand", "ground_pick", "kick_left", "kick_right", "roulade")
@@ -105,6 +133,7 @@ def build_manifest(
     command_help: dict[str, Any] | None = None,
     training: dict[str, Any] | None = None,
     eval: dict[str, Any] | None = None,
+    perception: str = "none",
 ) -> dict[str, Any]:
     """A single-policy manifest the daemon loads without surprises.
 
@@ -114,6 +143,8 @@ def build_manifest(
     """
     if kind not in KINDS:
         raise ManifestError(f"kind must be one of {KINDS}, not {kind!r}")
+    if perception not in PERCEPTIONS:
+        raise ManifestError(f"perception must be one of {tuple(PERCEPTIONS)}, not {perception!r}")
     if not name or "/" in name or name != name.strip():
         raise ManifestError(f"name must be a bare word a client can ask for, not {name!r}")
     if kind == "episodic":
@@ -156,10 +187,11 @@ def build_manifest(
     if command_help:
         command.update(command_help)
 
+    perceptive = perception != "none"
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "model_api": MODEL_API,
-        "obs_len": OBS_LEN,
+        "model_api": MODEL_API_PERCEPTIVE if perceptive else MODEL_API,
+        "obs_len": PERCEPTIONS[perception],
         "action_len": ACTION_LEN,
         "robot": dict(ROBOT),
         "name": name,
@@ -168,6 +200,8 @@ def build_manifest(
         "description": description,
         "command": command,
     }
+    if perceptive:
+        manifest["perception"] = perception
     if kind == "episodic":
         manifest["duration_s"] = float(duration_s)  # type: ignore[arg-type]
         manifest["chain"] = bool(chain)
@@ -198,12 +232,22 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
                 raise ManifestError("every set entry needs a `file`")
             validate_manifest({k: v for k, v in entry.items() if k != "file"})
         return
-    if (obs := manifest.get("obs_len")) is not None and obs != OBS_LEN:
-        raise ManifestError(f"obs_len {obs}: this robot builds {OBS_LEN}")
+    perception = manifest.get("perception") or "none"
+    if perception not in PERCEPTIONS:
+        raise ManifestError(f"perception {perception!r}: this robot feeds {tuple(PERCEPTIONS)}")
+    expected_obs = PERCEPTIONS[perception]
+    if (obs := manifest.get("obs_len")) is not None and obs != expected_obs:
+        if perception == "none" and obs in PERCEPTIONS.values():
+            raise ManifestError(f"obs_len {obs} without `perception`: say which frame the policy reads")
+        raise ManifestError(f"obs_len {obs}: this robot builds {expected_obs} for perception {perception!r}")
     if (act := manifest.get("action_len")) is not None and act != ACTION_LEN:
         raise ManifestError(f"action_len {act}: this robot has {ACTION_LEN}")
-    if (api := manifest.get("model_api")) is not None and api > MODEL_API:
-        raise ManifestError(f"model_api {api}: this repo targets {MODEL_API}")
+    api = manifest.get("model_api")
+    allowed = MODEL_API_PERCEPTIVE if perception != "none" else MODEL_API
+    if api is not None and api > allowed:
+        raise ManifestError(f"model_api {api}: this repo targets {allowed} for perception {perception!r}")
+    if perception != "none" and api is not None and api < MODEL_API_PERCEPTIVE:
+        raise ManifestError(f"model_api {api}: a {perception} policy needs {MODEL_API_PERCEPTIVE}")
     model = (manifest.get("robot") or {}).get("model")
     if model is not None and model.lower() != ROBOT["model"]:
         raise ManifestError(f"robot.model {model!r}: this is a {ROBOT['model']} policy repo")
@@ -266,15 +310,15 @@ def inspect_onnx(path: Path) -> OnnxShape:
 
 
 def check_onnx(path: Path) -> OnnxShape:
-    """Refuse a file the daemon would refuse at load: wrong widths, or one that is not 61 -> 14."""
+    """Refuse a file the daemon would refuse at load: wrong widths — 61 -> 14 (blind) or
+    125 -> 14 (tof8x8) are the two the robot builds."""
     if not path.exists():
         raise ManifestError(f"{path}: no such file")
     shape = inspect_onnx(path)
-    if shape.obs_len != OBS_LEN:
-        raise ManifestError(
-            f"{path.name}: observation width is {shape.obs_len}, the robot builds {OBS_LEN} "
-            "(a 51-D policy is the legacy 3-value-command family, which the daemon refuses)"
-        )
+    try:
+        perception_of_width(shape.obs_len)
+    except ManifestError as e:
+        raise ManifestError(f"{path.name}: {e}") from None
     if shape.action_len != ACTION_LEN:
         raise ManifestError(f"{path.name}: {shape.action_len} actions, the robot has {ACTION_LEN}")
     return shape
@@ -303,7 +347,11 @@ def smoke_run_onnx(path: Path, steps: int = 50, seed: int = 0) -> None:
         # Feed the action back into the last-action slots and jitter the rest, the way an
         # observation evolves on the robot; enough to leave the zero point.
         obs = rng.normal(0.0, 0.05, size=obs.shape).astype(np.float32)
-        obs[0, -ACTION_LEN - 13 : -13] = np.clip(out[0], -1, 1)
+        obs[0, OBS_LEN - ACTION_LEN - 13 : OBS_LEN - 13] = np.clip(out[0], -1, 1)
+        if shape.obs_len > OBS_LEN:      # a ToF frame: floor ahead in the lower rows, nothing above
+            frame = np.ones(64, dtype=np.float32)
+            frame[32:] = rng.uniform(0.2, 0.8, size=32)
+            obs[0, OBS_LEN:] = frame
     spread = float(np.std(np.stack(outputs)))
     if spread == 0.0:
         raise ManifestError(f"{path.name}: the network's output never changes; is it a real policy?")
@@ -342,6 +390,7 @@ def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None
     name = manifest["name"]
     description = manifest.get("description", "")
     training = manifest.get("training", {})
+    perception = manifest.get("perception") or "none"
     run = install_commands(manifest, repo_id)
     if kind == "episodic":
         timing = f"Runs {manifest['duration_s']} s and returns itself to a standing pose."
@@ -376,7 +425,12 @@ def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None
         description,
         "",
         f"A **{kind}** policy for the [microduck](https://github.com/pollen-robotics/microduck) "
-        f"({OBS_LEN}-D observation, {ACTION_LEN} actions, {ROBOT['control_hz']} Hz). {timing}",
+        f"({PERCEPTIONS[perception]}-D observation"
+        + (f": the {OBS_LEN}-D proprioception + command, then the head ToF's 8×8 frame" if perception == "tof8x8" else "")
+        + f", {ACTION_LEN} actions, {ROBOT['control_hz']} Hz). {timing}",
+        *(["", "Reads the head's VL53L8CX time-of-flight sensor (`perception: tof8x8`): the daemon "
+            "appends the 64 ranges to the observation, so it needs `tofd` running and a daemon with "
+            f"`model_api` ≥ {MODEL_API_PERCEPTIVE}."] if perception == "tof8x8" else []),
         "",
         "## Run it on a robot",
         "",
