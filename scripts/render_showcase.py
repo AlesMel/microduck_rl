@@ -3,17 +3,16 @@ robot of the batch grey and translucent, an inset of the perception input as the
 it, the feet marked at every contact (green = on one level, red = on an edge / against a riser),
 a HUD with the running count of edge contacts, and a slow camera orbit.
 
-Three perception modes, picked from the task's actor observation:
+Three perception modes, picked from the task's actor observation (the stairs tasks: tof_map):
   ToF      the head sensor's 64 beams and hit points; inset = the 8×8 frame
-  scan     the oracle height map's 133 points on the ground; inset = the 19×7 grid (forward = up)
-  tof_map  the ToF-built map (run 10): the beams faint, the 133 scan points as the policy reads them
+  scan     an exact height scan's 133 points on the ground; inset = the 19×7 grid (forward = up)
+  tof_map  the ToF-built map: the beams faint, the 133 scan points as the policy reads them
            from its map, cells it has never seen hollow grey; inset = the map with unknown cells dark
 
     # on the GPU box (records the rollout, then renders offscreen with EGL):
     MUJOCO_GL=egl uv run python scripts/render_showcase.py record --checkpoint <run>/model_2999.pt \\
         --device cuda --num-envs 32 --seconds 8 --out showcase.npz
     MUJOCO_GL=egl uv run python scripts/render_showcase.py render --states showcase.npz --video showcase.mp4
-    # the oracle: add --task Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck to BOTH commands
 
 Heroes: for each step tile (single_step, short_flight) the robot on the highest row that ended on
 top of its step — a clean one (no edge contact) if there is one, else the earliest; one segment
@@ -36,7 +35,7 @@ from view_terrain_env import WalkPolicy, _terrain_layout, build_env  # noqa: E40
 from mjlab_microduck.tasks import mdp as microduck_mdp  # noqa: E402
 from mjlab_microduck.tasks import tof  # noqa: E402
 
-TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"
+TASK = "Mjlab-StairsUp-Backlash-MicroDuck"
 STEP_TILES = ("single_step", "short_flight", "high_step")   # high_step: the envelope grid (run 11a)
 FPS = 25
 

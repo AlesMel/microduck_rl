@@ -243,6 +243,42 @@ def test_warm_start_patch_resets_counters(monkeypatch):
     assert r.current_learning_iteration == 3750
 
 
+def test_warm_start_with_fixed_schedule_uses_configured_lr(monkeypatch):
+    """The loaded optimizer state carries the source run's last adaptive LR; a fixed-schedule
+    warm start must train at the configured LR instead. Adaptive runs are left alone (PPO
+    rewrites the LR before the first step)."""
+    from mjlab.rl.runner import MjlabOnPolicyRunner
+
+    def runner(schedule):
+        class _Unwrapped:
+            common_step_counter = 24000
+
+        class _Env:
+            unwrapped = _Unwrapped()
+
+        class _Alg:
+            learning_rate = 1e-4
+            optimizer = torch.optim.Adam([torch.nn.Parameter(torch.zeros(2))], lr=3.4e-4)  # "loaded" LR
+
+        _Alg.schedule = schedule
+
+        class _Runner:
+            env = _Env()
+            alg = _Alg()
+            current_learning_iteration = 1000
+
+        return _Runner()
+
+    monkeypatch.setattr(microduck_mdp, "_orig_runner_load", lambda self, path, *a, **k: {})
+    monkeypatch.setenv(microduck_mdp.WARM_START_ENV, "1")
+    r = runner("fixed")
+    MjlabOnPolicyRunner.load(r, "model_1000.pt")
+    assert [g["lr"] for g in r.alg.optimizer.param_groups] == [1e-4]
+    r = runner("adaptive")
+    MjlabOnPolicyRunner.load(r, "model_1000.pt")
+    assert [g["lr"] for g in r.alg.optimizer.param_groups] == [3.4e-4]
+
+
 # ── Run-1 fixes: fallen-scaled smoothness + side spawns ──────────────────────
 
 def test_smoothness_costs_are_fallen_scaled():

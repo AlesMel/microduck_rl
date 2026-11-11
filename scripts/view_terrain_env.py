@@ -106,8 +106,10 @@ class WalkPolicy:
     """A walking policy driven through its observation: constant twist, head/body zero.
     ``onnx``: a published ONNX (normalizer baked in, 61D in → 14D out); else an rsl_rl .pt."""
 
-    def __init__(self, path: str, vx: float, vy: float, wz: float, onnx: bool, device: str = "cpu"):
+    def __init__(self, path: str, vx: float, vy: float, wz: float, onnx: bool, device: str = "cpu",
+                 head: tuple[float, ...] | None = None):
         self.cmd = (vx, vy, wz)
+        self.head = head          # the head_pose slot (4); None = zero, as every battery before 2026-11-08
         if onnx:
             import onnxruntime as ort
             self.session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
@@ -121,6 +123,8 @@ class WalkPolicy:
 
     def __call__(self, obs) -> torch.Tensor:
         o = command_obs(_actor(obs), *self.cmd)
+        if self.head is not None:
+            o[:, 51:51 + len(self.head)] = torch.tensor(self.head, dtype=o.dtype, device=o.device)
         if self.policy is not None:
             return self.policy(o)
         # Published ONNX files are exported with a fixed batch of 1: one run per robot.

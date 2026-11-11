@@ -3,7 +3,7 @@ rendered in a restyled look — warm dark terrain fading into fog, a sky gradien
 the hero for shadows, no ghost robots, the ToF beams / height-map dots / foot halos of the showcase,
 a perception inset, lower-third captions, cream title / end cards (palette and fonts at the top).
 
-    # on a GPU box, after recording (scripts/marketing/step_up_record.sh: 50 states/s for slow motion):
+    # on a GPU box, after recording (render_showcase.py record --fps 50: 50 states/s for slow motion):
     MUJOCO_GL=egl uv run python scripts/render_marketing.py pair --left mk/alpha_walking_lo.npz --right mk/now_lo.npz
     MUJOCO_GL=egl uv run python scripts/render_marketing.py still --board mk/board.json --clip 2 --at 0.5 --out s.png
     MUJOCO_GL=egl uv run python scripts/render_marketing.py cut --board mk/board.json --video microduck_steps.mp4

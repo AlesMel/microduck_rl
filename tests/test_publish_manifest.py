@@ -364,9 +364,22 @@ def test_a_125_to_14_graph_passes_and_smoke_runs(tmp_path):
     m.smoke_run_onnx(path)
 
 
-def test_the_task_registry_says_which_tasks_are_perceptive():
-    assert m.perception_of_task("Mjlab-StepUp-Tof-Backlash-MicroDuck") == "tof8x8"
+def test_the_task_registry_says_which_tasks_are_perceptive(monkeypatch):
+    # No registered task feeds the raw 8x8 frame to the actor any more (the step-up line that did
+    # was retired 2026-11-11; stairs up reads a ToF-built map), so register a throwaway one.
+    from copy import deepcopy
+
+    import mjlab_microduck.tasks  # noqa: F401
+    from mjlab.managers import ObservationTermCfg
+    from mjlab.tasks import registry
+    from mjlab_microduck.tasks import tof
+
+    entry = deepcopy(registry._REGISTRY["Mjlab-WalkV2-Stairs-MicroDuck"])
+    entry.play_env_cfg.observations["actor"].terms["tof"] = ObservationTermCfg(func=tof.tof_depth)
+    monkeypatch.setitem(registry._REGISTRY, "Test-Tof-Actor-MicroDuck", entry)
+    assert m.perception_of_task("Test-Tof-Actor-MicroDuck") == "tof8x8"
     assert m.perception_of_task("Mjlab-WalkV2-Stairs-MicroDuck") == "none"
+    assert m.perception_of_task("Mjlab-StairsUp-Backlash-MicroDuck") == "none"     # the map is not the frame
 
 
 def test_the_readme_says_a_perceptive_policy_reads_the_tof():

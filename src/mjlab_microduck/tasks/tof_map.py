@@ -90,6 +90,35 @@ class TofHeightMap:
         self.last_xy[env_ids] = pos_w[env_ids, :2]
         self.phase[env_ids] = torch.rand(k, device=dev)
 
+    def prefill(self, env_ids: torch.Tensor, heights_fn, window_x=(-0.6, 0.6), window_y=(-0.3, 0.3)) -> None:
+        """Run 15: write the exact ground around a just-reset env into its map, as if it had walked
+        there (one noisy measurement per cell, ``noise_abs``): a robot spawned at a down edge
+        otherwise starts with an empty map where a walking one remembers the edge. Call right
+        after :meth:`reset` (odometry error zero, so the estimated frame is the world's).
+        ``heights_fn``: (…, 2) world xy → (…) ground z."""
+        if len(env_ids) == 0:
+            return
+        dev = self.device
+        xs = torch.arange(self.nx, device=dev) * self.res + self.x0
+        ys = torch.arange(self.ny, device=dev) * self.res + self.y0
+        mi = (xs >= window_x[0]) & (xs <= window_x[1])
+        mj = (ys >= window_y[0]) & (ys <= window_y[1])
+        ii, jj = torch.nonzero(mi).flatten(), torch.nonzero(mj).flatten()
+        gx, gy = torch.meshgrid(xs[ii], ys[jj], indexing="ij")                     # (I, J) anchor frame
+        yaw = self.anchor_yaw[env_ids][:, None, None]
+        wx, wy = _rot2(gx[None], gy[None], yaw)
+        wx = wx + self.anchor[env_ids, 0][:, None, None]
+        wy = wy + self.anchor[env_ids, 1][:, None, None]
+        h = heights_fn(torch.stack([wx, wy], dim=-1)) - self.anchor[env_ids, 2][:, None, None]
+        h = h + torch.randn_like(h) * self.noise_abs
+        e = env_ids[:, None, None]
+        I, J = ii[None, :, None], jj[None, None, :]
+        if self.fuse == "latest":
+            self.grid[e, I, J] = h
+        else:
+            self.sum[e, I, J] = h
+            self.cnt[e, I, J] = 1.0
+
     def advance_odometry(self, pos_w: torch.Tensor) -> None:
         """Grow the odometry error with the distance travelled since the last call."""
         d = pos_w[:, :2] - self.last_xy
@@ -229,6 +258,13 @@ class tof_map_scan:
             # No frame on this first call after a reset: the sensor's hits may still be the
             # pre-reset pose's. phase ≤ 0.4 + 0.3 per step → the first frame 2-4 steps later.
             self.map.phase[ids] = torch.rand(len(ids), device=self.map.device) * 0.4
+            pre = getattr(env, "_tof_prefill", None)               # run 15: spawned inside a step down
+            if pre is not None:
+                sel = ids[pre[ids]]
+                if len(sel):
+                    from mjlab_microduck.tasks.mdp import terrain_height_field
+                    self.map.prefill(sel, terrain_height_field(env).heights)
+                    pre[sel] = False
             self.fresh[:] = False
         self.map.advance_odometry(pos)
         d = env.scene.sensors[self.sensor_name].data

@@ -28,6 +28,7 @@ Preview either, with the robot standing on it, via ``scripts/view_terrain_env.py
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import mujoco
@@ -142,11 +143,17 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
     """One step UP along +x and nothing after it: flat approach → ``num_steps`` risers (1 for the
     single step, 2-3 for a short flight) → a top platform to the end of the tile. Full width.
 
-    The step-up skill's terrain (``docs/step_up_perception.md``). The approach length is drawn
+    The step-up skill's terrain (``docs/archive/stairs_runlog.md``). The approach length is drawn
     per tile from ``approach_range`` so the step is not always at the same distance from the
     spawn — the ToF has to find it. The riser height follows difficulty. No step down: the
     height-progress reward is potential-based on trunk z, and a tile that only goes up makes
     "end higher than you started" exactly the skill.
+
+    ``down=True`` (run 12, docs §19) mirrors the levels: the "approach" is a platform at
+    ``num_steps`` × riser, the risers go DOWN along +x, and the bottom platform (z = 0) runs to the
+    end of the tile. The spawn origin is on the upper platform (origin z = the platform's top), so
+    "spawn at the origin's level" (``reset_root_on_terrain``'s ``low_frac``) puts robots above the
+    drop on both kinds of tile.
     """
 
     step_height_range: tuple[float, float] = (0.015, 0.040)
@@ -161,6 +168,8 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
     """Run 11b: when set, the tread depth is drawn per tile from this range instead of
     ``step_width`` (stride adaptation — run 10's flights were trained on 15 cm treads only)."""
     thickness: float = 0.5
+    down: bool = False
+    """Run 12: the risers go down along +x (spawn above them)."""
 
     def step_height(self, difficulty: float) -> float:
         return _lerp(self.step_height_range[0], self.step_height_range[1], difficulty)
@@ -174,12 +183,14 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
         h = self.step_height(difficulty)
         width = self.size[1]
         approach = float(rng.uniform(*self.approach_range))
-        segments: list[tuple[float, float, float]] = [(0.0, approach, 0.0)]
+        n = self.num_steps
+        level = (lambda k: (n - k) * h) if self.down else (lambda k: k * h)   # level k = after k risers
+        segments: list[tuple[float, float, float]] = [(0.0, approach, level(0))]
         x = approach
-        for k in range(1, self.num_steps):
-            segments.append((x, x + tread, k * h))
+        for k in range(1, n):
+            segments.append((x, x + tread, level(k)))
             x += tread
-        segments.append((x, self.size[0], self.num_steps * h))
+        segments.append((x, self.size[0], level(n)))
         assert self.size[0] - x >= 1.0, "top platform shorter than 1 m"
         geometries: list[TerrainGeometry] = []
         for x0, x1, top in segments:
@@ -191,7 +202,7 @@ class BoxSingleStepTerrainCfg(SubTerrainCfg):
             )
             shade = 0.45 + 0.5 * (top / max(self.num_steps * h, 1e-6))
             geometries.append(TerrainGeometry(geom=geom, color=(0.4, 0.55 * shade, shade, 1.0)))
-        origin = np.array([0.5, width / 2.0, 0.0])          # 0.3-1.1 m before the first riser
+        origin = np.array([0.5, width / 2.0, level(0)])     # 0.3-1.1 m before the first riser
         return TerrainOutput(origin=origin, geometries=geometries)
 
 
@@ -363,6 +374,35 @@ def make_microduck_step_up_terrains_cfg(
 ) -> TerrainGeneratorCfg:
     """Step-up curriculum grid for the microduck (rows = riser height 1.5 → 4 cm)."""
     return _generator(microduck_step_up_subterrains(scale, high_step, tread_range), num_rows, seed, border_width)
+
+
+# Run 12 (up + down, docs §19): the step-up grid with the same steps mirrored downhill. Half the
+# robots meet risers going up, 40 % going down (``DOWN_TILES``), 10 % flat ground.
+DOWN_TILES = ("single_drop", "down_flight")
+
+
+def microduck_step_updown_subterrains(scale: float = 1.0,
+                                      tread_range: tuple[float, float] | None = None) -> dict[str, SubTerrainCfg]:
+    """Run 12 menu: run 11b's columns (flat, single step, 3-riser flight) plus their downhill mirrors
+    (``single_drop``, ``down_flight``), same riser band by row and the same tread DR on both flights."""
+    heights = (STEP_UP_HEIGHT_RANGE[0] * scale, STEP_UP_HEIGHT_RANGE[1] * scale)
+    return {
+        "flat": terrain_gen.BoxFlatTerrainCfg(proportion=0.10),
+        "single_step": BoxSingleStepTerrainCfg(proportion=0.25, step_height_range=heights, num_steps=1),
+        "short_flight": BoxSingleStepTerrainCfg(proportion=0.25, step_height_range=heights, num_steps=3,
+                                                step_width_range=tread_range),
+        "single_drop": BoxSingleStepTerrainCfg(proportion=0.15, step_height_range=heights, num_steps=1, down=True),
+        "down_flight": BoxSingleStepTerrainCfg(proportion=0.25, step_height_range=heights, num_steps=3,
+                                               step_width_range=tread_range, down=True),
+    }
+
+
+def make_microduck_step_updown_terrains_cfg(
+    num_rows: int = NUM_ROWS, scale: float = 1.0, seed: int | None = None, border_width: float = BORDER_WIDTH,
+    tread_range: tuple[float, float] | None = None,
+) -> TerrainGeneratorCfg:
+    """Run 12: the step-up grid plus the downhill columns (rows = riser height 1.5 → 4 cm)."""
+    return _generator(microduck_step_updown_subterrains(scale, tread_range), num_rows, seed, border_width)
 
 
 def make_microduck_step_up_envelope_terrains_cfg(
