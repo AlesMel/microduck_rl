@@ -68,22 +68,52 @@ uv run scripts/eval/render_ckpt.py MODEL.pt out.mp4 [--task Mjlab-WalkV2-Rough-B
 stop, backward 0.3, sideways 0.2, turn 1.0 rad/s, stand. The overlay shows the command and
 the measured forward speed; a per-segment summary is printed at the end.
 
-## Stairs and the step-up skill (walk v2 terrain line, `docs/step_up_perception.md`)
+## Stairs (`docs/stairs.md`; history in `docs/archive/stairs_runlog.md`)
 
-The default task of these is a step-up task; all take `--checkpoint` / `--task` / `--device cuda`.
+The stairs line keeps three policies: stairs up (`Mjlab-StairsUp[-Backlash]-MicroDuck`, run 15),
+stairs down (`Mjlab-StairsDown[-Backlash]-MicroDuck`, run 18d) and the switch of the two
+(`tasks/stairs_switch.py`: the down policy while the ToF map shows a drop ahead, the up policy
+otherwise). The default task of these scripts is `Mjlab-StairsUp-Backlash-MicroDuck`; all take
+`--checkpoint` / `--task` / `--device`, and `--checkpoint switch:<down.pt>+<up.pt>` runs the switch
+(`_common.load_policy`).
 
-- **stairs_feasibility.py** — quasi-static torque budget of a step-up: what the knee needs per
-  riser height vs the XL330 cap, from a blind stairs checkpoint (run 3). The "why perception" number.
-- **step_up_eval.py** — per-row on-top / fell table with the ToF-blind ablation (runs 6-7b).
-  Superseded by `step_up_failures.py`; kept for the numbers quoted in the design doc.
-- **step_up_failures.py** — the clean-climb test: 384 robots, per riser height, WHY a robot
+- **stairs_battery.py** — how many steps in a row: one long straight staircase per riser height
+  (`--heights` cm, `--steps 20`, `--tread`), robots walked at a constant `--vx`; per robot the
+  risers climbed, the clean run (risers before the first toe catch / edge landing, same
+  definitions as `step_up_failures.py`), and where it fell; Kaplan-Meier summaries per height.
+  `--down` turns the staircase around (spawn on top, walk down; clean = no edge contact, the
+  training cost's definition). The ToF map is extended to cover the tile (`--map-x`). The runlog's
+  batteries: 20 risers, `--tread 0.20 --seconds 45 --head down`. §17-19, §28-29.
+- **stairs_contacts.py** — what the descent's edge contacts are (the `--down` staircase).
+  - Each contact is classified as landing vs stance (the foot touched down across the edge, or
+    stood clean and then went over the nose) and as leading vs trailing foot.
+  - Per edge crossing by one foot: lift-off distance behind the edge, landing distance beyond it,
+    stride, and the touchdown impact (peak foot force, trunk |a_z|, v_z).
+  - The loaded foot's pitch on flat ground, near an edge, and in an edge contact.
+  - `--hard-terrain` undoes the training's softened terrain contacts; `--vx` runs it at other speeds.
+
+  §20 and on.
+- **step_up_failures.py** — the clean-climb test on the play grid: per riser height, WHY a robot
   stumbles (toe catch, edge landing, blind gap, slowdown, fall context); `--riser-range LO HI`
-  puts other single-step heights on the grid (where clean climbing ends); on a `high_step` tile
-  reports `stopped`. JSON: `rows[]` per robot.
-- **tof_map_quality.py** — the ToF-built height map vs the exact terrain while approaching a
-  riser (coverage, height error, edge placement), per sensor/odometry model.
+  puts other single-step heights on the grid (where clean climbing ends). JSON: `rows[]` per robot.
+- **step_down_static.py** — static test: can the rear leg hold all the weight while the front foot is
+  placed flat on the next tread, step down vs step up (reach, torques, mesh hits on the step; `--video`).
+  `--keep-poses` stores every valid pose; `scripts/make_step_down_bank.py` and
+  `scripts/make_edge_crouch_bank.py` turn that into the spawn banks in `tasks/data/`
+  (`step_down_poses.json`, `edge_stand_poses.json`, `edge_crouch_poses.json`). §22, §26.
+- **edge_spawn_check.py** — the down-edge spawns before training on them: sole gaps and CoM at
+  spawn, first-step trunk speed, leg-geom contacts, falls within `--seconds` under a checkpoint,
+  zero actions, or `--hold` (hold the spawn pose; prints the servo sag). `--event` picks the spawn
+  (`reset_at_down_edge`, or stairs down's `reset_edge_stand` / `reset_edge_crouch` with
+  `--task Mjlab-StairsDown-Backlash-MicroDuck`). §23, §26.
+- **stairs_feasibility.py** — quasi-static torque budget of a step-up: what the knee needs per
+  riser height vs the XL330 cap, from a blind walk-v2 stairs checkpoint (`Mjlab-WalkV2-Stairs-*`).
+  The "why perception" number.
 
 Related, one level up: `scripts/view_terrain_env.py` (interactive viewer / headless video of a
-policy on the terrain grid, `build_env` helper the tests above use) and `scripts/render_showcase.py`
-(showcase and side-by-side comparison videos with the policy's perception drawn in).
-
+policy on the terrain grid, and the `build_env` helper the batteries use),
+`scripts/render_showcase.py` (showcase and side-by-side comparison videos with the policy's
+perception drawn in; `render_marketing.py` reuses its renderer), and
+`scripts/render_staircase.py` (the `stairs_battery.py` test filmed: one typical hero per
+staircase — clean climb, climb with slips, fall — with the battery's own catch / edge-landing
+counts in the HUD).

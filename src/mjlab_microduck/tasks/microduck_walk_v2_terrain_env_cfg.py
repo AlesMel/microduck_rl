@@ -159,6 +159,7 @@ from mjlab_microduck.tasks.microduck_terrains import (
     make_microduck_stairs_terrains_cfg,
     make_microduck_step_up_envelope_terrains_cfg,
     make_microduck_step_up_terrains_cfg,
+    make_microduck_step_updown_terrains_cfg,
     make_microduck_terrains_cfg,
 )
 from mjlab_microduck.tasks.microduck_velstand_env_cfg import _collapse_curricula_to_final
@@ -173,6 +174,7 @@ TERRAIN_MENUS = {
     "stairs": make_microduck_stairs_terrains_cfg,
     "step_up": make_microduck_step_up_terrains_cfg,     # the perceptive step-up skill's grid
     "step_up_envelope": make_microduck_step_up_envelope_terrains_cfg,   # + the too-high column (run 11a)
+    "step_updown": make_microduck_step_updown_terrains_cfg,   # + the same steps going down (run 12)
 }
 PLAY_ROWS = 4                   # play / preview: every column at 4 difficulties
 MAX_INIT_TERRAIN_LEVEL = 0      # training starts every robot on the easiest row

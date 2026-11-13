@@ -29,6 +29,8 @@ src/mjlab_microduck/robot/microduck.bak/*
 src/mjlab_microduck/robot/microduck_test/*
 data/
 *.pt
+# local policy checkpoints (the stairs switch: ckpts/stairs/stairs_{up,down}.pt; docs/stairs.md)
+ckpts/
 
 claude_experiments/
 

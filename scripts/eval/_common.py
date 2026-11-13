@@ -23,7 +23,38 @@ DEFAULT_WALK_TASK = "Mjlab-WalkV2-Flat-Backlash-MicroDuck"
 
 def load_policy(ckpt: str, device: str = "cpu"):
     """rsl_rl checkpoint → deterministic actor, normalizer applied as rsl_rl does
-    ((x − mean) / (std + 1e-2)), 512-256-128 ELU MLP."""
+    ((x − mean) / (std + 1e-2)), 512-256-128 ELU MLP.
+
+    ``switch:<down.pt>+<up.pt>``: the stairs switch (tasks/stairs_switch.py) — the two 327-D stairs
+    policies switched per step by the ToF-map scan in the obs, ``down`` while the scan shows a drop
+    ahead, ``up`` otherwise.
+
+    ``*.onnx``: an exported policy (scripts/export.py, normalizer baked in), run with onnxruntime on
+    the CPU — the deployment rehearsal for policies infer_policy.py cannot drive (the 327-D stairs
+    obs). Either half of a ``switch:`` can be one."""
+    if ckpt.startswith("switch:"):
+        from mjlab_microduck.tasks.stairs_switch import switch_policies
+
+        down, up = (load_policy(p, device) for p in ckpt[len("switch:"):].split("+"))
+        return switch_policies(down, up)
+    if ckpt.endswith(".onnx"):
+        import numpy as np
+        import onnxruntime as ort
+
+        sess = ort.InferenceSession(ckpt, providers=["CPUExecutionProvider"])
+        inp = sess.get_inputs()[0]
+        one = inp.shape[0] == 1                 # the exporter fixes batch = 1, as the robot runs it
+
+        @torch.no_grad()
+        def onnx_policy(obs: torch.Tensor) -> torch.Tensor:
+            x = obs.detach().cpu().numpy().astype(np.float32)
+            if one:                             # run the exact exported file, one robot at a time
+                out = np.concatenate([sess.run(None, {inp.name: x[i:i + 1]})[0] for i in range(len(x))])
+            else:
+                out = sess.run(None, {inp.name: x})[0]
+            return torch.from_numpy(out).to(obs.device)
+
+        return onnx_policy
     sd = torch.load(ckpt, map_location=device, weights_only=False)["actor_state_dict"]
     mean, std = sd["obs_normalizer._mean"], sd["obs_normalizer._std"] + 1e-2
     layers = [(sd[f"mlp.{i}.weight"], sd[f"mlp.{i}.bias"]) for i in (0, 2, 4, 6)]

@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from view_terrain_env import WalkPolicy, _terrain_layout, build_env  # noqa: E402
 from mjlab_microduck.tasks import tof  # noqa: E402
 
-TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"
+TASK = "Mjlab-StairsUp-Backlash-MicroDuck"
 STEP_TILES = ("single_step", "short_flight", "high_step")   # high_step (run 11a): the right answer is to STOP
 HIGH_TILES = ("high_step",)
 VIEW_M = 1.0          # the policy's clip: beyond this a zone reads "nothing"

@@ -12,7 +12,7 @@ itself — so the beams are cast as-is by mjlab's ``RayCastSensor`` with full (`
 alignment and move with the head. (The site's quat looks like a z-forward rotation in the XML,
 but the parent body's own frame undoes it; trust the world-frame check, not the XML.)
 
-Observation contract (``docs/step_up_perception.md``): 64 values in wire order,
+Observation contract (``docs/archive/stairs_runlog.md``): 64 values in wire order,
 ``min(range, OBS_CLIP_M) / OBS_CLIP_M``; "nothing in range", "could not measure" and ranges
 below the 0.12 m floor all read 1.0. The runtime must append the live frame with the same rule.
 """

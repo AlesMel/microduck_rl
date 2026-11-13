@@ -269,6 +269,74 @@ MICRODUCK_WALK_BACKLASH_ROBOT_CFG = EntityCfg(
     ),
 )
 
+# ── Step-up run 15 (docs/archive/stairs_runlog.md §23): legs that hit the step ────────────────────
+# robot_walk(_backlash) collides ONLY its feet with the terrain: FULL_COLLISION enables the geoms
+# named *_collision (the two soles) and disables every other geom. A descending duck crouches with
+# its knee pointing BACKWARD, toward the riser, and the static test (scripts/eval/step_down_static.py,
+# §22) rejects 11-16 step-down poses per riser height because the front thigh sinks into the step
+# nose; going up, the front shin does. In training both passed through the step. These two specs
+# add a collision geom per thigh and shin, named so that FULL_COLLISION enables them:
+#   - the shin: the group-3 mesh onshape-to-robot exported for it (unnamed, so disabled until now);
+#   - the thigh: the convex hull of its visual meshes (no collision mesh exists), ≤ 48 hull vertices.
+# Both are massless (density 0): the bodies' inertia stays the XML's.
+
+def add_leg_collisions(spec: mujoco.MjSpec, maxhullvert: int = 48) -> mujoco.MjSpec:
+    import numpy as np
+    from scipy.spatial import ConvexHull
+
+    m = spec.compile()
+    for side, thigh, shin in (("left", "upper_leg_left", "leg"), ("right", "upper_leg_right", "leg_2")):
+        g3 = [g for g in spec.body(shin).geoms if g.group == 3]
+        assert len(g3) == 1, f"{shin}: expected one group-3 collision mesh, found {len(g3)}"
+        g3[0].name = f"{side}_shin_collision"
+        b = m.body(thigh).id
+        pts = []
+        for g in range(m.ngeom):
+            if m.geom_bodyid[g] != b or m.geom_type[g] != mujoco.mjtGeom.mjGEOM_MESH:
+                continue
+            mid = m.geom_dataid[g]
+            v = m.mesh_vert[m.mesh_vertadr[mid]: m.mesh_vertadr[mid] + m.mesh_vertnum[mid]]
+            R = np.zeros(9)
+            mujoco.mju_quat2Mat(R, m.geom_quat[g])
+            pts.append(v @ R.reshape(3, 3).T + m.geom_pos[g])
+        P = np.concatenate(pts).astype(np.float64)
+        hull = P[ConvexHull(P).vertices]
+        name = f"{side}_thigh_hull"
+        spec.add_mesh(name=name, uservert=hull.flatten().tolist(), maxhullvert=maxhullvert)
+        spec.body(thigh).add_geom(name=f"{side}_thigh_collision", type=mujoco.mjtGeom.mjGEOM_MESH, meshname=name,
+                                  group=3, density=0.0, rgba=[0.8, 0.3, 0.3, 0.0])
+    spec.compile()   # the compile above froze MjSpec's name index: spec.geom(<new name>) is None until a recompile
+    return spec
+
+
+def get_walk_legcol_spec() -> mujoco.MjSpec:
+    return add_leg_collisions(get_walk_spec())
+
+
+def get_walk_backlash_legcol_spec() -> mujoco.MjSpec:
+    return add_leg_collisions(get_walk_backlash_spec())
+
+
+MICRODUCK_WALK_LEGCOL_ROBOT_CFG = EntityCfg(
+    spec_fn=get_walk_legcol_spec,
+    init_state=HOME_FRAME,
+    collisions=(FULL_COLLISION,),
+    articulation=EntityArticulationInfoCfg(
+        actuators=(actuators,),
+        soft_joint_pos_limit_factor=0.9,
+    ),
+)
+
+MICRODUCK_WALK_BACKLASH_LEGCOL_ROBOT_CFG = EntityCfg(
+    spec_fn=get_walk_backlash_legcol_spec,
+    init_state=BACKLASH_HOME_FRAME,
+    collisions=(FULL_COLLISION,),
+    articulation=EntityArticulationInfoCfg(
+        actuators=(backlash_actuators,),
+        soft_joint_pos_limit_factor=0.9,
+    ),
+)
+
 # All-collisions backlash robot → VelStand backlash tasks (mirrors
 # MICRODUCK_ALLCOLLISIONS_ROBOT_CFG).
 MICRODUCK_ALLCOLLISIONS_BACKLASH_ROBOT_CFG = EntityCfg(

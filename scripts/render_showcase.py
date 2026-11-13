@@ -3,17 +3,16 @@ robot of the batch grey and translucent, an inset of the perception input as the
 it, the feet marked at every contact (green = on one level, red = on an edge / against a riser),
 a HUD with the running count of edge contacts, and a slow camera orbit.
 
-Three perception modes, picked from the task's actor observation:
+Three perception modes, picked from the task's actor observation (the stairs tasks: tof_map):
   ToF      the head sensor's 64 beams and hit points; inset = the 8×8 frame
-  scan     the oracle height map's 133 points on the ground; inset = the 19×7 grid (forward = up)
-  tof_map  the ToF-built map (run 10): the beams faint, the 133 scan points as the policy reads them
+  scan     an exact height scan's 133 points on the ground; inset = the 19×7 grid (forward = up)
+  tof_map  the ToF-built map: the beams faint, the 133 scan points as the policy reads them
            from its map, cells it has never seen hollow grey; inset = the map with unknown cells dark
 
     # on the GPU box (records the rollout, then renders offscreen with EGL):
     MUJOCO_GL=egl uv run python scripts/render_showcase.py record --checkpoint <run>/model_2999.pt \\
         --device cuda --num-envs 32 --seconds 8 --out showcase.npz
     MUJOCO_GL=egl uv run python scripts/render_showcase.py render --states showcase.npz --video showcase.mp4
-    # the oracle: add --task Mjlab-StepUp-Oracle-Clean-Backlash-MicroDuck to BOTH commands
 
 Heroes: for each step tile (single_step, short_flight) the robot on the highest row that ended on
 top of its step — a clean one (no edge contact) if there is one, else the earliest; one segment
@@ -36,7 +35,7 @@ from view_terrain_env import WalkPolicy, _terrain_layout, build_env  # noqa: E40
 from mjlab_microduck.tasks import mdp as microduck_mdp  # noqa: E402
 from mjlab_microduck.tasks import tof  # noqa: E402
 
-TASK = "Mjlab-StepUp-Tof-Backlash-MicroDuck"
+TASK = "Mjlab-StairsUp-Backlash-MicroDuck"
 STEP_TILES = ("single_step", "short_flight", "high_step")   # high_step: the envelope grid (run 11a)
 FPS = 25
 
@@ -59,9 +58,20 @@ def _scan_points_w(env, params: dict) -> torch.Tensor:
     return torch.cat([xy, hf.heights(xy)[..., None]], dim=-1)
 
 
+def riser_hook(riser_range):
+    """Another span of SINGLE-step heights on the play grid (as ``step_up_failures.py --riser-range``);
+    a recording made with one must be rendered with the same hook (it is stored in the .npz)."""
+    if riser_range is None or len(riser_range) == 0:
+        return None
+
+    def hook(cfg):
+        cfg.scene.terrain.terrain_generator.sub_terrains["single_step"].step_height_range = tuple(float(r) for r in riser_range)
+    return hook
+
+
 def record(a) -> None:
-    env = build_env(a.task, a.num_envs, a.seed, a.device, fixed_heading=False)
-    policy = WalkPolicy(a.checkpoint, a.vx, 0.0, 0.0, onnx=False, device=a.device)
+    env = build_env(a.task, a.num_envs, a.seed, a.device, fixed_heading=False, cfg_hook=riser_hook(a.riser_range))
+    policy = WalkPolicy(a.checkpoint, a.vx, 0.0, 0.0, onnx=a.checkpoint.endswith(".onnx"), device=a.device)
     robot = env.scene["robot"]
     sensor = env.scene.sensors.get(tof.TOF_SENSOR_NAME)
     om = env.observation_manager
@@ -85,7 +95,7 @@ def record(a) -> None:
     names, types, levels, _ = _terrain_layout(env)
     gen = env.scene.terrain.cfg.terrain_generator
     nq = env.sim.mj_model.nq
-    stride = max(1, round(1.0 / (FPS * env.step_dt)))
+    stride = max(1, round(1.0 / (a.fps * env.step_dt)))
     obs, _ = env.reset()
     origins = env.scene.env_origins.cpu().numpy()
     z0 = (robot.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]).cpu().numpy()
@@ -131,7 +141,7 @@ def record(a) -> None:
             if names[types[i]] != t or fallen[-1][i]:
                 continue
             top = np.nonzero(rise[:, i] >= 0.8 * riser[i])[0]
-            if len(top) and rise[-FPS:, i].mean() >= 0.8 * riser[i]:
+            if len(top) and rise[-a.fps:, i].mean() >= 0.8 * riser[i]:
                 dirty = int(edge_count[i].item() > 0)
                 cand.append((-int(levels[i]), dirty, int(top[0]), i))
         if cand:
@@ -148,7 +158,8 @@ def record(a) -> None:
                             len(microduck_mdp.scan_grid(scan_params["x_range"], scan_params["y_range"], scan_params["res"])[0]),
                             len(microduck_mdp.scan_grid(scan_params["x_range"], scan_params["y_range"], scan_params["res"])[1])]),
                         names=np.array(names), types=types, levels=levels, env_origins=origins,
-                        heroes=np.array(heroes), fps=FPS, dt=env.step_dt * stride, task=a.task)
+                        heroes=np.array(heroes), fps=a.fps, dt=env.step_dt * stride, task=a.task,
+                        riser_range=np.array(a.riser_range or [], dtype=np.float64))
     print("states →", a.out)
 
 
@@ -168,6 +179,12 @@ def _height_colour(scan_value: np.ndarray) -> np.ndarray:
 
 
 class Showcase:
+    # Colours, overridable per instance (render_marketing.py restyles them).
+    beam_cmap = staticmethod(_turbo)                 # range in [0, 1] (0 = near) → rgb
+    height_cmap = staticmethod(_height_colour)       # scan value → rgb
+    halo_clean = (0.15, 0.85, 0.35, 0.85)
+    halo_edge = (0.95, 0.12, 0.1, 0.95)
+
     def __init__(self, env, width: int, height: int):
         self.hf = microduck_mdp.terrain_height_field(env)     # halo height = the ground under the foot
         self.mjm = env.sim.mj_model
@@ -210,7 +227,7 @@ class Showcase:
                 self.scene.geoms[g].rgba[:] = grey
         if mode == "tof":
             # ToF beams from the sensor to the hit points, coloured by range (near warm → far cool).
-            col = _turbo(np.clip(dists, 0, 1.0) * 0.85)      # 1 m → blue, not the map's near-black end
+            col = self.beam_cmap(np.clip(dists, 0, 1.0) * 0.85)      # 1 m → blue, not the map's near-black end
             for z in range(64):
                 if dists[z] < 0:
                     continue
@@ -223,7 +240,7 @@ class Showcase:
         else:
             if mode == "tof_map" and beams is not None:
                 # What is being measured: the ToF beams, faint, and the hit points within the map's reach.
-                col = _turbo(np.clip(dists, 0, 1.0) * 0.85)
+                col = self.beam_cmap(np.clip(dists, 0, 1.0) * 0.85)
                 for z in range(64):
                     if dists[z] < 0:
                         continue
@@ -235,7 +252,7 @@ class Showcase:
                 self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, spos, (0.006, 0, 0), (1, 1, 1, 1))
             # The height map the policy reads: one dot per scan point, on the terrain surface;
             # on the ToF-built map a cell never seen is a small hollow grey dot.
-            col = _height_colour(scan_values)
+            col = self.height_cmap(scan_values)
             for z in range(hits.shape[0]):
                 if known is not None and not known[z]:
                     self._add_marker(mujoco.mjtGeom.mjGEOM_SPHERE, hits[z] + np.array([0, 0, 0.003]), (0.0028, 0, 0),
@@ -248,7 +265,7 @@ class Showcase:
             pos, found, edge = feet
             for f in range(2):
                 if found[f]:
-                    rgba = (0.95, 0.12, 0.1, 0.95) if edge[f] else (0.15, 0.85, 0.35, 0.85)
+                    rgba = self.halo_edge if edge[f] else self.halo_clean
                     ground = float(self.hf.heights(torch.tensor(pos[f][None, :2], dtype=torch.float32))[0])
                     self._add_marker(mujoco.mjtGeom.mjGEOM_CYLINDER, np.array([pos[f][0], pos[f][1], ground + 0.0015]),
                                      (0.04, 0.0012, 0), rgba)             # wider than the sole: a halo
@@ -336,7 +353,8 @@ def render(a) -> None:
     has_feet = "foot_pos" in st
     T, N = qpos.shape[:2]
     dt = float(st["dt"])
-    env = build_env(task, N, a.seed, "cpu", fixed_heading=False)   # same grid: seeded generator
+    env = build_env(task, N, a.seed, "cpu", fixed_heading=False,   # same grid: seeded generator
+                    cfg_hook=riser_hook(st["riser_range"]) if "riser_range" in st else None)
     shw = Showcase(env, a.width, a.height)
     writer = imageio.get_writer(a.video, fps=FPS, codec="libx264", quality=8, macro_block_size=1)
     try:
@@ -419,7 +437,8 @@ def compare(a) -> None:
     for path, label in ((a.left, a.left_label), (a.right, a.right_label)):
         st = np.load(path, allow_pickle=False)
         N = st["qpos"].shape[1]
-        env = build_env(str(st["task"]), N, a.seed, "cpu", fixed_heading=False)
+        env = build_env(str(st["task"]), N, a.seed, "cpu", fixed_heading=False,
+                        cfg_hook=riser_hook(st["riser_range"]) if "riser_range" in st else None)
         sides.append(dict(st=st, mode=str(st["mode"]), shw=Showcase(env, a.width // 2, a.height), label=label,
                           names=[str(n) for n in st["names"]], N=N, dt=float(st["dt"])))
     T = min(s_["st"]["qpos"].shape[0] for s_ in sides)
@@ -499,6 +518,9 @@ def main() -> None:
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--out", default="showcase.npz")
     r.add_argument("--task", default=TASK)
+    r.add_argument("--fps", type=int, default=FPS, help="states per second (50 = every control step, for slow motion)")
+    r.add_argument("--riser-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="single-step riser span on the play grid, metres")
     v = sub.add_parser("render")
     v.add_argument("--states", required=True)
     v.add_argument("--video", default="showcase.mp4")
