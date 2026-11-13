@@ -53,7 +53,12 @@ from .microduck_ground_pick_env_cfg import (
     MicroduckGroundPickRlCfg,
 )
 from .microduck_stairs_up_env_cfg import MicroduckStairsUpRlCfg, make_microduck_stairs_up_env_cfg
-from .microduck_stairs_down_env_cfg import MicroduckStairsDownRlCfg, make_microduck_stairs_down_env_cfg
+from .microduck_stairs_down_env_cfg import (
+    MicroduckStairsDownHeadRollRlCfg,
+    MicroduckStairsDownRlCfg,
+    make_microduck_stairs_down_env_cfg,
+    make_microduck_stairs_down_head_roll_env_cfg,
+)
 from .microduck_ball_kick_env_cfg import (
     make_microduck_ball_kick_env_cfg,
     MicroduckBallKickRlCfg,
@@ -342,6 +347,7 @@ _BACKLASH_TASKS = (
     ("Mjlab-WalkV2-StairsMode-Finetune-Backlash-MicroDuck", make_microduck_walk_v2_terrain_env_cfg, {"menu": "stairs", "finetune": True, "v2": True, "apex": True, "stairs_mode": True}, MicroduckWalkV2StairsModeRlCfg, _BL_WALK),
     ("Mjlab-StairsUp-Backlash-MicroDuck", make_microduck_stairs_up_env_cfg, {}, MicroduckStairsUpRlCfg, MICRODUCK_WALK_BACKLASH_LEGCOL_ROBOT_CFG),
     ("Mjlab-StairsDown-Backlash-MicroDuck", make_microduck_stairs_down_env_cfg, {}, MicroduckStairsDownRlCfg, MICRODUCK_WALK_BACKLASH_LEGCOL_ROBOT_CFG),
+    ("Mjlab-StairsDown-HeadRoll-Backlash-MicroDuck", make_microduck_stairs_down_head_roll_env_cfg, {}, MicroduckStairsDownHeadRollRlCfg, MICRODUCK_WALK_BACKLASH_LEGCOL_ROBOT_CFG),
     ("Mjlab-StandUp-Flat-Backlash-MicroDuck", make_microduck_standup_env_cfg, {}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-StandUp-Rough-Backlash-MicroDuck", make_microduck_standup_env_cfg, {"rough": True}, MicroduckStandUpRlCfg, _BL_GROUNDCONTACT),
     ("Mjlab-SitStand-Flat-Backlash-MicroDuck", make_microduck_sitstand_env_cfg, {}, MicroduckSitStandRlCfg, _BL_GROUNDCONTACT),

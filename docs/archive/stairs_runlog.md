@@ -2092,3 +2092,184 @@ Files (gpu box):
 - `logs/distill18b2/`: 18b2 train, the staircases at 2250 / 2500 / 2750, and the switch
   (`switch.sh`, `down_switch_t20.*`, `up_switch_t20.*`, `impact_switch.*`). The 18b2 final chain was
   stopped once 2750 had settled it. Last checkpoint `ckpts/stepup_18b2_last.pt` (model_2998).
+
+## 30. Head fine-tunes of 18d: head calm, head smooth, head roll; the lucky checkpoint (2026-11-11 → 13, `Mjlab-StairsDown-Head{Calm,Smooth,Roll}-*`)
+
+**Question:** 18d descends with its head wobbling. Head yaw swings 27° rms, the yaw servo turns at
+346 °/s rms, and head roll sits on its stop (|q| > 0.42 rad) 86 % of the descent. The head carries
+the ToF sensor, so the map knows only 34 % of the cells ahead. Can a fine-tune calm the head and
+keep the descent?
+
+**Where the wobble comes from** (`scripts/eval/head_wobble.py`, new; 18d, 3 cm unless noted):
+- The head is almost free in the reward: `head_pose_tracking` 0.5 at std 0.5, and `head_pose_bias`
+  is a 1 s EMA that lets a symmetric swing cancel.
+- Zero-shot ablations, no retraining (`--head-lowpass-hz` and holds, seed 1, 3 / 4 / 5 cm, 200 robots each):
+
+| 18d with | bottom of 200 | fell | yaw servo ω rms (°/s) | map ahead known |
+| --- | --- | --- | --- | --- |
+| nothing | 145 / 131 / 75 | 16 / 50 / 106 | 302 / 324 / 338 | 0.34 |
+| roll held at 0 | 151 / 127 / 87 | 12 / 49 / 94 | 291 / 310 / 332 | 0.40 |
+| yaw and roll held at 0 | 134 / 119 / 58 | 21 / 58 / 124 | 111 / 120 / 134 | 0.69 |
+| yaw low-pass 2 Hz | 136 / 120 / 69 | 26 / 58 / 111 | 190 / 202 / 210 | 0.40 |
+| yaw low-pass 1 Hz | 135 / 121 / 73 | 29 / 64 / 105 | 146 / 152 / 158 | 0.45 |
+| yaw low-pass 0.5 Hz | 136 / 110 / 62 | 38 / 73 / 112 | 128 / 129 / 133 | 0.51 |
+
+- **Roll:** holding it costs nothing.
+- **Yaw:** any filtering costs about 10 of 200 at 3–4 cm, about the same from 2 Hz to a full hold.
+  That looks like the policy being off its trained loop more than needing a fast yaw. Even with yaw
+  held, the yaw rate reads 111 °/s from the trunk's motion, so judge the yaw swing (output rms), not
+  the rate.
+- **Pitch** is used: it is the counterweight of the step-off. None of the fine-tunes price it.
+
+**Three fine-tunes of 18d**, each a warm start (`MICRODUCK_WARM_START=1`) for 500 iterations. Every
+inherited curriculum sits at its final stage from step 0, so only the new ramps start over. The head
+calm and head smooth task ids were retired once head roll was swapped in (2026-11-13). Their cfgs and
+tests are in `logs/backup/head_calm_smooth_2026-11-13.tar.gz` (gitignored, Mac).
+- **Head calm** (retired `Mjlab-StairsDown-HeadCalm-*`):
+  - `head_calm_l1` (`mdp.head_joint_error_l1`, self-negating) on head yaw and roll, weight
+    1 → 2 → 4 at iterations 0 / 50 / 100
+  - `head_roll_stop` (`mdp.joint_pos_limit_proximity`, a cost) on head roll within 0.10 rad of the
+    limits, weight −5 → −10 at 50
+- **Head calm, resumed** 499 → 998 at the same weights.
+- **Head smooth** (retired `Mjlab-StairsDown-HeadSmooth-*`):
+  - `head_yaw_vel` (`joint_vel_l2`) on the yaw servo, −0.0025 → −0.01
+  - `head_roll_l1` with weight 1
+  - `head_roll_stop` with weight −5
+- **Control:** the same warm start with no head terms (`--agent.experiment_name stairs_down_ctrl`).
+
+**At first all three looked like they cost the descent**, judged against 18d `model_2997`. That
+checkpoint scored 169 / 165 / 144 / 95 / 33 on the down battery (§29 settings, seed 0, 200 robots per
+height, 2–6 cm):
+
+| checkpoint | bottom of 200 | fell | left sideways | yaw ω rms (°/s) | roll on its stop | map ahead |
+| --- | --- | --- | --- | --- | --- | --- |
+| 18d 2997 | 169 / 165 / 144 / 95 / 33 | 5 / 19 / 43 / 93 / 146 | 26 / 16 / 13 / 12 / 21 | 346 | 86 % | 0.34 |
+| head calm 499 | 162 / 147 / 130 / 89 / 20 | 8 / 24 / 43 / 92 / 153 | 30 / 29 / 27 / 19 / 27 | 202 | 38 % | 0.44 |
+| head calm 998 (resumed) | 136 / 130 / 83 / 49 / 21 | 21 / 41 / 88 / 130 / 149 | | 192 | 12 % | 0.37 |
+| head smooth 499 | 134 / 134 / 115 / 75 / 35 | 10 / 27 / 53 / 89 / 140 | 56 / 39 / 32 / 36 / 25 | 261 | 46 % | 0.31 |
+| control 499 | 130 / 145 / 101 / 59 / 20 | 12 / 33 / 70 / 108 / 162 | 58 / 22 / 29 / 33 / 18 | 374 | 87 % | 0.30 |
+
+**The control lost as much as the head fine-tunes, so the head terms were not the cause.**
+- **Same cfg:** 18d's `params/env.yaml` and the control's are identical. The agent cfgs differ only
+  in iterations and names.
+- **Training did not regress.** Over its last 50 iterations the control matches 18d's last 50
+  (iterations 2947–2997) on every term: mean reward 85.8 against 84.2, `fell_over` 4.9 against 4.6,
+  `descent_progress` 1.08 against 1.03.
+- **The battery varies far more between checkpoints of one run than between seeds:**
+
+| | bottom of 200, 2 / 3 / 4 / 5 / 6 cm |
+| --- | --- |
+| 18d 2997, seeds 0 / 1 / 2 | 169 / 165 / 144 / 95 / 33 · 161 / 164 / 153 / 81 / 30 · 172 / 167 / 138 / 93 / 43 |
+| control model_0 (18d + 1 update) | 171 / 161 / 131 / 83 / 29 |
+| 18d 2250 | 155 / 146 / 111 / 51 / 12 |
+| 18d 2500 | 144 / 138 / 114 / 60 / 33 |
+| 18d 2750 | 132 / 129 / 84 / 48 / 20 |
+
+18d's last checkpoint is the best of its own run on this battery. Its siblings 250 iterations apart
+average about 144 / 138 / 103 / 53 / 22. §28 already showed the spread: at iteration 2500, 18d read
+71 / 71 / 53 / 32 / 12 % at 100 robots per height. The fine-tunes had fallen back to the run's
+typical level, not below it.
+
+**Why the battery is so checkpoint-sensitive:** it runs 45 s on fixed 20 cm treads with no heading
+command. Training uses 15 s episodes with heading targets. So straightness over a long flight (robots
+leaving sideways: 12–60 between siblings) and falls late in a flight are barely pinned by the reward.
+
+**Re-judged against the spread.** Each checkpoint got two descent samples: A, the battery (seed 0,
+2–6 cm), and B, `head_wobble.py` (seed 1, 3 / 4 / 5 cm, 600 robots, 45 s).
+
+| run, mean of 4 checkpoints | A: bottom of 200 | B: bottom of 200 |
+| --- | --- | --- |
+| 18d (2250 / 2500 / 2750 / 2997) | 150 / 145 / 113 / 64 / 25 | 131 / 100 / 52 |
+| head calm (250 / 499 / 750 / 998) | 146 / 135 / 104 / 65 / 23 | 119 / 100 / 53 |
+
+- **Descent:** head calm is level with 18d's run at 4–6 cm and about 10 robots lower at 3 cm.
+  `model_499` is its best checkpoint, equal to 2997 on B (139 / 131 / 75 against 145 / 131 / 75).
+- **Head:** every 18d checkpoint and the control wobble alike (yaw ω 340–374 °/s, roll on its stop
+  83–87 %), so the calming is the penalty's doing, not checkpoint noise.
+- **Not caused by head calm:** "head looks further down" and "trunk roll up" were features of the
+  2997 outlier. 18d's siblings read −10 to −13° and 5.4–6.1°.
+- **Caused by head calm:** head pitch rms rose 2–4°.
+
+**Head roll** (`make_microduck_stairs_down_head_roll_env_cfg`, experiment `stairs_down_head_roll`,
+save every 50). A warm start from head calm `model_499` with roll priced harder and yaw lighter:
+- `head_roll_l1` on roll, weight 4 → 6 → 8 at iterations 0 / 50 / 100
+- `head_yaw_l1` on yaw, weight 2 (head calm: 4 on yaw and roll)
+- `head_roll_stop` with margin 0.12, weight −10 → −20 → −30
+- pitch free
+
+Over its last 50 iterations against head calm's: `drop_free` 1.30 (1.11), `descent_progress` 1.12
+(1.17), `fell_over` 3.93 (3.72), every penalty ≤ 0. Roll on its stop at 3 cm, by checkpoint:
+50 → 40 %, 200 → 19 %, 350 → 10 %, 400 → 5.4 %, 450 → 3.7 %, 499 → 0.5 %.
+
+| checkpoint | A: bottom of 200 | A: fell | B: bottom | yaw ω (°/s) | yaw out rms | roll out rms | roll on its stop, 3 / 4 / 5 cm | map ahead |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 18d 2997 | 169 / 165 / 144 / 95 / 33 | 5 / 19 / 43 / 93 / 146 | 145 / 131 / 75 | 346 | 27.2° | 13.0° | 86 / 87 / 87 % | 0.34 |
+| head calm 499 | 162 / 147 / 130 / 89 / 20 | 8 / 24 / 43 / 92 / 153 | 139 / 131 / 75 | 202 | 15.4° | 12.0° | 38 / 41 / 44 % | 0.44 |
+| head roll 300 | 167 / 159 / 147 / 98 / 40 | 4 / 13 / 41 / 84 / 143 | 149 / 145 / 78 | 239 | 17.9° | 10.3° | 16 % at 3 cm | 0.56 |
+| head roll 450 | 158 / 150 / 117 / 84 / 32 | 5 / 17 / 35 / 85 / 125 | 127 / 120 / 64 | 219 | 16.7° | 7.3° | 3.7 / 4.4 / 4.9 % | 0.54 |
+| head roll 499 | 139 / 148 / 125 / 86 / 37 | 9 / 21 / 48 / 94 / 132 | 120 / 115 / 76 | 223 | 17.3° | 5.5° | 0.5 / 1.0 / 1.5 % | 0.52 |
+
+- **Roll:** below 5 % at every height from 450 on.
+- **Descent:** 450 and 499 sit at or above 18d's run mean at 3–6 cm. 499's falls are at 2997's
+  level; its 2 cm shortfall is robots leaving sideways (52 of 200, against 26).
+- **Yaw:** a little worse than head calm, still a third below 18d.
+- **Gaze:** the head no longer looks further down (mean world pitch −4 to +2°; head calm −11°, 18d
+  −5°). Head pitch is 19–20° rms (18d 16.6°).
+- **Pick:** `model_499`, whose roll is essentially never on its stop. Runner-up 450.
+
+**Swap checks** (2026-11-13):
+- **ONNX:** `scripts/export.py Mjlab-StairsDown-HeadRoll-Backlash-MicroDuck --checkpoint-file
+  <run>/model_499.pt` gives obs [1, 327] and actions [1, 14]. Its metadata carries
+  `checkpoint_sha256` = the .pt's sha256.
+- **The rehearsal runs in sim.** `infer_policy.py` cannot drive a 327-D policy, and robotd has no
+  327-D kind yet. `scripts/eval/_common.load_policy` now loads `*.onnx`: onnxruntime on the CPU, one
+  robot at a time, the exact exported file. Either half of a `switch:` can be one.
+- **Parity:** over 64 robots × 1500 steps on the 3 cm down staircase, the largest
+  |a_pt − a_onnx| is 3.3e-6 (mean |a| 0.50).
+- **Switch battery** (1000 robots, §29 settings, the 18d switch re-run alongside):
+
+| | switch with 18d | switch with head roll 499 (.pt) | same, ONNX down half |
+| --- | --- | --- | --- |
+| down: bottom of 200 | 173 / 162 / 131 / 82 / 26 | 156 / 162 / 141 / 100 / 37 | 155 / 160 / 128 / 90 / 27 |
+| down: fell | 8 / 23 / 57 / 109 / 158 | 6 / 23 / 46 / 90 / 152 | 9 / 23 / 59 / 94 / 163 |
+| down: left sideways | 19 / 15 / 12 / 9 / 16 | 38 / 15 / 13 / 10 / 11 | 36 / 17 / 13 / 16 / 10 |
+| up: top of 200 | 180 / 195 / 188 / 149 / 25 | 185 / 192 / 186 / 158 / 30 | |
+| up: fell | 0 / 0 / 6 / 44 / 157 | 0 / 1 / 7 / 32 / 157 | |
+
+- **Contacts battery** (the down policy alone, 600 robots, 2 / 3 / 4 cm), 18d → head roll 499:
+
+| | 18d | head roll 499 |
+| --- | --- | --- |
+| bottom of 200 | 188 / 167 / 145 | 172 / 152 / 136 |
+| fell | 8 / 33 / 55 | 17 / 37 / 52 |
+| edge contacts per riser | 0.61 / 0.59 / 0.58 | 0.38 / 0.34 / 0.34 |
+| clean leading crossings | 80 / 79 / 78 % | 90 / 91 / 90 % |
+| trunk at the leading lift-off p50 (mm) | 108 / 106 / 104 | 106 / 103 / 101 |
+| leading step-off: trunk v_z before touchdown (m/s) | −0.12 / −0.17 / −0.23 | −0.08 / −0.13 / −0.18 |
+| peak foot force p50 (N) | 20.2 / 22.1 / 23.3 | 19.7 / 21.4 / 22.6 |
+
+**What it shows:**
+- **In the switch,** head roll 499 descends as well as 18d from 3 cm up, better at 4–6 cm on the .pt
+  run, and 17 fewer at 2 cm, where robots leave sideways. Climbing is unchanged.
+- **On its own,** it touches 40 % fewer edges and lands its step-offs softer.
+- **What to watch:** more falls at 2 cm on the contacts battery (17 against 8). That is measured
+  against the lucky 18d checkpoint; no other 18d checkpoint was run on that battery.
+- **Swapped in 2026-11-13:** `ckpts/stairs/stairs_down.pt` = head roll `model_499`,
+  `stairs_down.onnx` its export, and 18d kept as `stairs_down_18d.pt`.
+
+**The general lesson:** judge a stairs fine-tune by several checkpoints of each run (save every 50)
+and compare spreads. A single final checkpoint can be the run's best or its worst.
+
+Files (gpu box, `~/microduck_rl_playground`):
+- Run dirs under `logs/rsl_rl/`:
+  - head calm: `stairs_down_head_calm/2026-11-11_13-00-04_*`, resumed in `2026-11-11_21-48-41_*`
+  - head smooth: `stairs_down_head_smooth/2026-11-12_09-15-27_*`
+  - control: `stairs_down_ctrl/2026-11-12_10-09-56_*`
+  - head roll: `stairs_down_head_roll/2026-11-12_23-02-39_*`
+- Evals under `mk/`:
+  - `head_wobble/`: the zero-shot ablations
+  - `head_calm/eval/`, `head_smooth/`, `down_ctrl/eval/`
+  - `down_var/`: 18d's siblings and seeds
+  - `rejudge/`
+  - `head_roll/eval/`: every checkpoint
+  - `head_roll/swap/`: ONNX, parity and the switch and contacts batteries

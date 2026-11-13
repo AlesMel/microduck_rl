@@ -6325,6 +6325,41 @@ def head_pose_bias_penalty(
     return out
 
 
+HEAD_CMD_IDX = {"neck_pitch": 0, "head_pitch": 1, "head_yaw": 2, "head_roll": 3}
+
+
+def head_joint_error_l1(
+    env: ManagerBasedRlEnv,
+    command_name: str = "head_pose",
+    joints: tuple[str, ...] = ("head_yaw", "head_roll"),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize the INSTANTANEOUS error of selected head joints: -sum(|err|) (≤ 0, positive weight).
+
+    For the joints whose swing is escapable, unlike head_pose_bias_penalty's 1 s EMA (which lets a
+    symmetric swing cancel). Motivating case: stairs-down run 18d swings head yaw ±60° and slams
+    head roll between its ±25° stops 85 % of the descent; holding roll at 0 costs nothing and yaw
+    little (scripts/eval/head_wobble.py, 2026-11-11), while head/neck PITCH is the counterweight the
+    descent needs, so it is left out. L1 keeps a constant gradient at the large errors the policy
+    starts from, where a tight Gaussian would be flat.
+
+    Measured on the output link (servo + backlash play), like head_pose_tracking and the encoder obs.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    cmd = env.command_manager.get_command(command_name)  # (N, 4)
+    if not hasattr(env, "_head_pose_neck_ids"):
+        head_pose_tracking(env, command_name=command_name, asset_cfg=asset_cfg)
+    sel = [HEAD_CMD_IDX[j] for j in joints]
+    neck_ids = env._head_pose_neck_ids[sel]
+    joint_pos = asset.data.joint_pos
+    measured = (
+        joint_pos[:, neck_ids]
+        + joint_pos[:, env._head_pose_bl_ids[sel]] * env._head_pose_bl_mask[sel]
+    )
+    err = (measured - asset.data.default_joint_pos[:, neck_ids]) - cmd[:, sel]
+    return -err.abs().sum(dim=-1)
+
+
 def body_pose_tracking_6d(
     env: ManagerBasedRlEnv,
     command_name: str = "body_pose",

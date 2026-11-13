@@ -24,7 +24,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from mjlab.managers import EventTermCfg, RewardTermCfg
+from mjlab.managers import CurriculumTermCfg, EventTermCfg, RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import RslRlOnPolicyRunnerCfg
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
@@ -133,3 +134,60 @@ MicroduckStairsDownRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStairsUpRlC
 MicroduckStairsDownRlCfg.experiment_name = "stairs_down"
 MicroduckStairsDownRlCfg.run_name = "stairs_down"
 MicroduckStairsDownRlCfg.max_iterations = 1000
+
+
+# ── head roll: the stairs-down policy since 2026-11-13 (ckpts/stairs/stairs_down.pt = model_499) ──
+# 18d swings head yaw (27° rms, the servo at 346 °/s) and parks head roll on its stop 86 % of the
+# descent, so the ToF map knows only a third of the cells ahead. The head is almost free in the reward
+# (head_pose_tracking 0.5 @ std 0.5; head_pose_bias is a 1 s EMA that lets a symmetric swing cancel).
+# Zero-shot on 18d (scripts/eval/head_wobble.py): holding roll at 0 costs nothing, holding yaw costs
+# ~10/200 at 3-4 cm, and PITCH is the step-off's counterweight (holding it collapses the descent).
+# Lineage, each a warm start (MICRODUCK_WARM_START=1) of 500 iterations; every inherited curriculum is
+# already at its final stage (step 0), so only the new ramps start over:
+#   18d model_2997 → head calm: L1 on head yaw + roll 1 → 2 → 4 at it 0/50/100, roll stop margin 0.10
+#   at −5 → −10 (retired task id Mjlab-StairsDown-HeadCalm-*, model_499 kept on the box) → head roll
+#   below. A head-smooth variant (L2 on head-yaw speed) was worse and is retired too. Both cfgs are in
+#   logs/backup/head_calm_smooth_2026-11-13.tar.gz; results in docs/archive/stairs_runlog.md §30.
+# Head calm model_499 descended at 18d's level and halved the yaw swing, but roll still sat on its stop
+# 38 % of the descent: the real-robot risk is the XL330 pushed into its stop. So roll L1 ramps past head
+# calm's weight, the stop band is wider and much heavier, and yaw keeps half head calm's weight so its
+# gain holds without pushing further. Pitch untouched. Sizing from head calm's last 50 iterations
+# (yaw+roll L1 −1.04 at weight 4, ≈ 0.13 rad each; roll stop −0.12 at −10): at calm 499's behaviour the
+# full weights read about roll L1 −1.0, yaw L1 −0.26, stop −0.6, falling as roll leaves the stop.
+# Checkpoints every 50 iterations: the 20-riser battery varies more between checkpoints than between
+# seeds, so pick by battery, not the last one.
+STEPS_PER_ITER = 24
+HEAD_CALM_FINAL_L1_WEIGHT = 4.0                                    # head calm's last yaw+roll L1 weight
+HEAD_ROLL_L1_STAGES = ((0, 4.0), (50, 6.0), (100, 8.0))           # (iteration, weight) per rad of |roll − cmd|
+HEAD_ROLL_YAW_L1_WEIGHT = 2.0                                      # per rad of |yaw − cmd| (head calm: 4)
+HEAD_ROLL_STOP_MARGIN = 0.12                                       # rad before the ±0.436 rad stop (head calm: 0.10)
+HEAD_ROLL_STOP_STAGES = ((0, -10.0), (50, -20.0), (100, -30.0))    # (iteration, weight) per rad inside the band
+HEAD_ROLL_INIT = "logs/rsl_rl/stairs_down_head_calm/2026-11-11_13-00-04_stairs_down_head_calm/model_499.pt"
+
+
+def make_microduck_stairs_down_head_roll_env_cfg(play: bool = False):
+    cfg = make_microduck_stairs_down_env_cfg(play=play)
+    r = cfg.rewards
+    l1, stop = HEAD_ROLL_L1_STAGES, HEAD_ROLL_STOP_STAGES
+    r["head_roll_l1"] = RewardTermCfg(func=microduck_mdp.head_joint_error_l1, weight=l1[0][1],
+                                      params={"command_name": "head_pose", "joints": ("head_roll",)})
+    r["head_yaw_l1"] = RewardTermCfg(func=microduck_mdp.head_joint_error_l1, weight=HEAD_ROLL_YAW_L1_WEIGHT,
+                                     params={"command_name": "head_pose", "joints": ("head_yaw",)})
+    r["head_roll_stop"] = RewardTermCfg(func=microduck_mdp.joint_pos_limit_proximity, weight=stop[0][1],
+                                        params={"asset_cfg": SceneEntityCfg("robot", joint_names=("head_roll",)),
+                                                "margin": HEAD_ROLL_STOP_MARGIN})
+
+    def ramp(name, stages):
+        return CurriculumTermCfg(func=microduck_mdp.reward_weight, params={
+            "reward_name": name,
+            "weight_stages": [{"step": it * STEPS_PER_ITER, "weight": w} for it, w in stages]})
+    cfg.curriculum["head_roll_l1_weight"] = ramp("head_roll_l1", l1)
+    cfg.curriculum["head_roll_stop_weight"] = ramp("head_roll_stop", stop)
+    return cfg
+
+
+MicroduckStairsDownHeadRollRlCfg: RslRlOnPolicyRunnerCfg = deepcopy(MicroduckStairsDownRlCfg)
+MicroduckStairsDownHeadRollRlCfg.experiment_name = "stairs_down_head_roll"
+MicroduckStairsDownHeadRollRlCfg.run_name = "stairs_down_head_roll"
+MicroduckStairsDownHeadRollRlCfg.max_iterations = 500
+MicroduckStairsDownHeadRollRlCfg.save_interval = 50

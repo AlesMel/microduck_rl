@@ -1,10 +1,12 @@
 # Stairs — up, down, and the switch between them
 
-Status 2026-11-11. Two 327-D perceptive policies (one for going up, one for going down) and a
+Status 2026-11-13. Two 327-D perceptive policies (one for going up, one for going down) and a
 hand-written switch between them. Everything here is simulation; nothing has run on the robot.
+Since 2026-11-13 the down policy is the head-roll fine-tune of 18d, which keeps its head roll off the
+servo stop (§30); 18d stays in `ckpts/stairs/stairs_down_18d.pt`.
 
 Every number cites its source as §N: section N of the run diary
-[`docs/archive/stairs_runlog.md`](archive/stairs_runlog.md) (runs 6 → 18d). Read the diary for
+[`docs/archive/stairs_runlog.md`](archive/stairs_runlog.md) (runs 6 → 18d, then the head fine-tunes, §30). Read the diary for
 the full tables and for runs not covered here. Unless a line says otherwise, a number comes from
 the **20-riser staircase battery**: one straight staircase per riser height, 20 risers, tread 20 cm,
 0.25 m/s forward command, head-down command, no heading correction, 45 s, 200 robots per height,
@@ -15,19 +17,28 @@ on the leg-collision robot model (§23–§29).
 - **Up.** The stairs-up policy reaches the top of 20 risers in 185 / 192 / 187 / 154 / 27 of 200
   runs at 2 / 3 / 4 / 5 / 6 cm risers, and 0 at 7 cm (§23). Its median clean run (risers before
   the first toe catch or edge landing) is 19 / >20 / >20 / 19 / 5 (§23).
-- **Down.** The stairs-down policy reaches the bottom in 176 / 160 / 141 / 93 / 27 of 200 at
-  2–6 cm and falls in 5 / 20 / 37 / 95 / 150 (§28). It lowers the trunk before the edge (104–108 mm
-  at the leading foot's lift-off, against 124 mm for the up policy) and its leading foot lands at
-  0.12–0.24 m/s, against 0.34–0.54 m/s for the up policy going down (§28).
+- **Down.** The stairs-down policy (head roll `model_499`) reaches the bottom in
+  139 / 148 / 125 / 86 / 37 of 200 at 2–6 cm and falls in 9 / 21 / 48 / 94 / 132, about as often
+  as 18d's best checkpoint (5 / 19 / 43 / 93 / 146). It reaches the bottom more often than the
+  average of 18d's checkpoints at 3–6 cm; at 2 cm more of its robots leave the stairs sideways (§30). It
+  lowers the trunk before the edge (101–106 mm at the leading foot's lift-off, against 124 mm for the
+  up policy) and its leading foot lands at 0.08–0.18 m/s, against 0.34–0.54 m/s for the up policy
+  going down (§28, §30).
+- **Head.** 18d swung head yaw 27° rms and parked head roll on its stop 86 % of the descent. The
+  down policy keeps roll on the stop 0.5–1.5 % of the time, swings yaw 17° rms and turns the
+  head-yaw servo at 223 °/s rms (18d: 346). The map then knows 52 % of the scan ahead, against 34 % (§30). Head pitch still
+  swings: it is the counterweight the descent needs (§30).
 - **Switch.** Using the down policy while the map shows a drop ahead, and the up policy otherwise,
-  keeps both skills. Up: 181 / 193 / 188 / 149 / 25 of 200 reach the top. Down: 171 / 161 / 149 / 80 / 20
-  reach the bottom, and 11 / 24 / 39 / 112 / 166 fall (§29).
+  keeps both skills. Up: 185 / 192 / 186 / 158 / 30 of 200 reach the top. Down: 156 / 162 / 141 / 100 / 37
+  reach the bottom, and 6 / 23 / 46 / 90 / 152 fall (§30; with 18d: 173 / 162 / 131 / 82 / 26 and
+  8 / 23 / 57 / 109 / 158 on the same run of the battery).
 - **No build-up along the flight.** On the way down at 4 cm the switch's fall hazard per riser is
-  0.2–1.5 % in every band from riser 1 to riser 20 (§29).
-- **Not clean.** Going down, the switch makes 0.55–0.57 edge contacts per riser (§29). Nine in ten
-  of the down policy's contacts are a foot tipped across the nose of a tread (§28).
-- **Envelope.** Up to 4 cm both directions work. At 5 cm the switch gets 75 % of the robots to the
-  top and 40 % to the bottom; at 6 cm, 13 % and 10 % (§29). Statically, a step down without a free
+  0.2–1.5 % in every band from riser 1 to riser 20 (§29, with 18d).
+- **Not clean.** The down policy makes 0.34–0.38 edge contacts per riser (18d: 0.58–0.61); 90 % of
+  its leading-foot crossings are clean (18d: 78–80 %) (§30). Most contacts are a foot tipped across
+  the nose of a tread (§28).
+- **Envelope.** Up to 4 cm both directions work. At 5 cm the switch gets 79 % of the robots to the
+  top and 50 % to the bottom; at 6 cm, 15 % and 18 % (§30). Statically, a step down without a free
   fall exists only up to 5 cm risers, and only from a deep crouch (trunk 10 / 9 / 8 / 7 cm for
   2 / 3 / 4 / 5 cm). Torque is never the limit: at most 0.29 N·m against the 0.64 N·m cap (§22).
 - **Turning on top** is not part of either policy (trained with no turn in place). VelStand turns
@@ -45,6 +56,9 @@ Caveats:
   arbiter. Its round trip (up, turn, down) has not been measured.
 - **Both policies come from long warm-started chains.** Retraining either one from scratch with the
   final cfg was never tested.
+- **Checkpoints of one run differ more than seeds do.** On the down battery, 18d's final checkpoint
+  scored 169 / 165 / 144 / 95 / 33 and its siblings 250 iterations earlier 132–155 / 129–146 / 84–114 /
+  48–60 / 12–33, while seeds moved it by 5–8 (§30). Compare runs by several checkpoints each.
 
 ## Perception (shared by both policies)
 
@@ -119,9 +133,10 @@ after run 4. Retraining from scratch with this final cfg was never tested.
 
 | | |
 | --- | --- |
-| task | `Mjlab-StairsDown-Backlash-MicroDuck` (trained as `Mjlab-StepDown-TeacherLongStairs-Backlash-MicroDuck`) |
-| cfg | `src/mjlab_microduck/tasks/microduck_stairs_down_env_cfg.py`, `make_microduck_stairs_down_env_cfg` |
-| checkpoint | `ckpts/stairs/stairs_down.pt` = run 18d `model_2997` (§28) |
+| task | `Mjlab-StairsDown-HeadRoll-Backlash-MicroDuck` = `Mjlab-StairsDown-Backlash-MicroDuck` + three head terms (§30). 18d trained as `Mjlab-StepDown-TeacherLongStairs-Backlash-MicroDuck` |
+| cfg | `src/mjlab_microduck/tasks/microduck_stairs_down_env_cfg.py`, `make_microduck_stairs_down_head_roll_env_cfg` on top of `make_microduck_stairs_down_env_cfg` |
+| checkpoint | `ckpts/stairs/stairs_down.pt` = head roll `model_499` (§30); `ckpts/stairs/stairs_down_18d.pt` = run 18d `model_2997` (§28) |
+| ONNX | `ckpts/stairs/stairs_down.onnx`, exported from `stairs_down.pt` (normalizer baked in, batch 1, 327 → 14) (§30) |
 
 **The idea:** the walking policy never crouched when only rewarded for it (see "What did not work").
 The tasks in this repo that did learn a crouch (ground pick, sitstand, roller crouch) make the
@@ -142,12 +157,24 @@ trunk height their main term (§26). So does this one:
   rad) so that a long descent can correct its drift (§28).
 - Run 15's downhill terms stay on (`clean_step_down`, `descent_progress`, the edge cost and
   `trunk_drop`) (§26).
+- **Head terms** (§30): 18d parked head roll on its stop and swung head yaw. Three terms price that:
+  - `head_roll_l1`: L1 on head roll against the command, weight 4 → 6 → 8.
+  - `head_yaw_l1`: the same on yaw, weight 2.
+  - `head_roll_stop`: a qpos-side cost within 0.12 rad of the roll limits, weight −10 → −20 → −30.
 
-**Lineage:** run 15 → 18a → 18c → 18d, 1000 iterations each. 18a (§26) was a warm start from run 15
-(`MICRODUCK_WARM_START=1`) on one riser with 4 s episodes. It learned a drop-free single step down,
-which runs 15–17 never did: from a stand, 90–99.5 % at iteration 500 and 96–99.5 % at 1000. 18c (§27)
-resumed it on 6-riser flights with per-riser terms; 18d (§28) resumed 18c on 20-riser flights with
-15 s episodes and heading targets.
+  Head pitch is free: it is the counterweight of the step-off.
+
+**Lineage:** run 15 → 18a → 18c → 18d, 1000 iterations each, then head calm → head roll, 500 each.
+- **18a** (§26) was a warm start from run 15 (`MICRODUCK_WARM_START=1`) on one riser with 4 s
+  episodes. It learned a drop-free single step down, which runs 15–17 never did: from a stand,
+  90–99.5 % at iteration 500 and 96–99.5 % at 1000.
+- **18c** (§27) resumed it on 6-riser flights with per-riser terms.
+- **18d** (§28) resumed 18c on 20-riser flights with 15 s episodes and heading targets.
+- **Head calm** (§30) was a warm start from 18d with L1 on head yaw and roll (weight 1 → 4) and a
+  roll stop cost. Its task id is retired; the cfg is in
+  `logs/backup/head_calm_smooth_2026-11-13.tar.gz`, and `model_499` is in its box run dir.
+- **Head roll** (§30) was a warm start from head calm `model_499` with the terms above: harder on
+  roll, lighter on yaw. Its checkpoint was picked by battery from ten saved every 50 iterations.
 
 **It depended on a bug fix.** `mdp._fallen_mask`, behind every "upright" gate, also marked a robot
 fallen when its trunk was below the env origin. On a down tile the origin is the top platform, so
@@ -162,7 +189,30 @@ about 12 cm down (3 risers at 4 cm) every upright-gated term went to zero: `clea
   (the up policy included) and 18a were barely touched, because their down tiles have at most 3
   risers of ≤ 4 cm, or a single drop (§28).
 
-**Measured** (§28, against run 15):
+**Measured, head roll `model_499`** (§30, against 18d `model_2997` on the same runs of the batteries):
+- **Down:** bottom of 200, 139 / 148 / 125 / 86 / 37 at 2–6 cm (18d: 169 / 165 / 144 / 95 / 33; 18d's
+  checkpoints 2250–2997 average 150 / 145 / 113 / 64 / 25). Fell 9 / 21 / 48 / 94 / 132
+  (18d: 5 / 19 / 43 / 93 / 146). Left the stairs sideways 52 / 31 / 27 / 20 / 31
+  (18d: 26 / 16 / 13 / 12 / 21); that is the 2 cm shortfall.
+- **Contacts battery** (600 robots, 2 / 3 / 4 cm):
+  - edge contacts per riser 0.38 / 0.34 / 0.34 (18d: 0.61 / 0.59 / 0.58)
+  - clean leading crossings 90 / 91 / 90 % (18d: 80 / 79 / 78 %)
+  - trunk at the leading lift-off 106 / 103 / 101 mm (18d: 108 / 106 / 104)
+  - landing v_z −0.08 / −0.13 / −0.18 m/s (18d: −0.12 / −0.17 / −0.23)
+
+  The same battery has it falling more at 2 cm (17 against 8) and reaching the bottom less often,
+  172 / 152 / 136 against 188 / 167 / 145. That is against 18d's lucky checkpoint: no other 18d
+  checkpoint was run on it.
+- **Head** (`scripts/eval/head_wobble.py`, 3 cm):
+  - head roll on its stop 0.5 / 1.0 / 1.5 % at 3 / 4 / 5 cm (18d: 86 / 87 / 87 %), roll 5.5° rms (13.0°)
+  - head yaw 17.3° rms (27.2°), the yaw servo turning at 223 °/s rms (346)
+  - map cells ahead known 0.52 (0.34)
+  - head pitch 19–20° rms (16.6°)
+- **ONNX:** the exported file matches the .pt to 3.3e-6 per action over 64 robots × 1500 steps on
+  the 3 cm stairs. The switch with the ONNX down half lands within seed noise of the .pt (§30).
+- **Not tested going up** on its own; in the switch the up policy climbs as before (§30).
+
+**Measured, 18d** (§28, against run 15):
 - **Down:** bottom of 200, 176 / 160 / 141 / 93 / 27 at 2–6 cm (run 15: 167 / 181 / 149 / 61 / 5).
   Fell 5 / 20 / 37 / 95 / 150 (run 15: 2 / 13 / 44 / 131 / 176). Left the stairs sideways
   19 / 20 / 22 / 12 / 23.
@@ -205,6 +255,22 @@ causes, untested: the hand-back to the up policy on the bottom platform, or a ma
 tread. Part may be noise: at 4 cm the staircase battery has the switch reaching the bottom more
 often than 18d (149 against 141), the contacts battery less often (126 against 145) (§29).
 
+**With the head-roll down policy** (§30, 2026-11-13; same settings, the 18d switch re-run alongside):
+
+| §30, 20-riser battery, 2 / 3 / 4 / 5 / 6 cm | switch with 18d | switch with head roll 499 | same, ONNX down half |
+| --- | --- | --- | --- |
+| up: top of 200 | 180 / 195 / 188 / 149 / 25 | 185 / 192 / 186 / 158 / 30 | not run |
+| up: fell of 200 | 0 / 0 / 6 / 44 / 157 | 0 / 1 / 7 / 32 / 157 | not run |
+| down: bottom of 200 | 173 / 162 / 131 / 82 / 26 | 156 / 162 / 141 / 100 / 37 | 155 / 160 / 128 / 90 / 27 |
+| down: fell of 200 | 8 / 23 / 57 / 109 / 158 | 6 / 23 / 46 / 90 / 152 | 9 / 23 / 59 / 94 / 163 |
+| down: left the stairs sideways | 19 / 15 / 12 / 9 / 16 | 38 / 15 / 13 / 10 / 11 | 36 / 17 / 13 / 16 / 10 |
+
+- **Down:** level with the 18d switch at 3 cm and better at 4–6 cm. At 2 cm 17 fewer reach the
+  bottom, because twice as many robots walk off the side.
+- **Up:** unchanged; the down policy only runs where the map shows a drop.
+- **ONNX run:** it differs from the .pt run by about what another seed would. The 1e-6 action
+  differences grow into different trajectories over 45 s.
+
 **Why not one distilled policy** (§29). 18b resumed run 15 with 18d's terms on the down tiles. After
 every PPO update, two BC anchors regressed the network: onto 18d on frames with a drop ahead (5
 epochs, lr 3e-4), and onto run 15 on frames with a step up (2 epochs, lr 1e-4).
@@ -231,14 +297,17 @@ Switching between the two experts keeps both skills.
 
 ## How to reproduce and use
 
-**Checkpoints.** Both are gitignored (`*.pt`). Copies are under `ckpts/stairs/` on the Mac and under
-`~/microduck_rl_playground/ckpts/stairs/` on the GPU box. Each is 7.4 MB: a full rsl_rl checkpoint
-including the optimizer. Future runs log under the experiment names `stairs_up` / `stairs_down`.
+**Checkpoints.** All are gitignored (`*.pt`, `*.onnx`, `ckpts/`). Copies are under `ckpts/stairs/`
+on the Mac and under `~/microduck_rl_playground/ckpts/stairs/` on the GPU box. Each .pt is 7.4 MB: a
+full rsl_rl checkpoint including the optimizer. Future runs log under the experiment names
+`stairs_up` / `stairs_down` / `stairs_down_head_roll`.
 
 | file | = | sha256 | GPU-box run dir |
 | --- | --- | --- | --- |
 | `stairs_up.pt` | run 15 `model_1999` (box copy `ckpts/stepup_15_model_1999.pt`) | `a6481bedcdfaf13902457969c5bc755057af18a99e84894d0a83fafe9016690a` | `logs/rsl_rl/step_up/2026-11-09_22-52-19_step_up_tofmap_updown_edge_15/` |
-| `stairs_down.pt` | run 18d `model_2997` (box copy `ckpts/stepdown_teacher_18d_last.pt`) | `e2c03de940e06e049f9e850a71aa28e8214e9a1a695c65ea8c45ec0e91890cce` | `logs/rsl_rl/step_up/2026-11-10_22-29-09_step_down_teacher_18d/` |
+| `stairs_down.pt` | head roll `model_499` (since 2026-11-13) | `9228385c7fd3a0d5920ee024153e65c90b4353b00d411a726ca7411895218675` | `logs/rsl_rl/stairs_down_head_roll/2026-11-12_23-02-39_stairs_down_head_roll/` |
+| `stairs_down.onnx` | `stairs_down.pt` exported by `scripts/export.py` (metadata `checkpoint_sha256` = the .pt's) | `5601efb8cc38b83cd6f4dfe1f3ca35fad07f82f0fe865f5bba005cf60eb46bb2` | box copy `mk/head_roll/stairs_down_head_roll_499.onnx` |
+| `stairs_down_18d.pt` | run 18d `model_2997`, the down policy until 2026-11-12 (box copy `ckpts/stepdown_teacher_18d_last.pt`) | `e2c03de940e06e049f9e850a71aa28e8214e9a1a695c65ea8c45ec0e91890cce` | `logs/rsl_rl/step_up/2026-11-10_22-29-09_step_down_teacher_18d/` |
 
 They are not on the Hub. Sharing them is opt-in, with `uv run share-training`
 (`docs/training_checkpoints.md`).
@@ -249,6 +318,7 @@ terrain. The §25–§29 numbers come from these settings:
 ```bash
 CK=ckpts/stairs/stairs_up.pt     # or ckpts/stairs/stairs_down.pt, or
                                  # switch:ckpts/stairs/stairs_down.pt+ckpts/stairs/stairs_up.pt
+                                 # (stairs_down_18d.pt for 18d; an .onnx runs the exported file on the CPU)
 # 20-riser staircase, 2-6 cm, 200 robots per height (add --heights 2 3 4 5 6 7 for 7 cm)
 uv run python scripts/eval/stairs_battery.py --task Mjlab-StairsUp-Backlash-MicroDuck \
     --checkpoint $CK --device cuda --num-envs 1000 --tread 0.20 --rows 2 --seconds 45 \
@@ -276,13 +346,21 @@ checkpoint is a warm start: prefix `MICRODUCK_WARM_START=1`, as 18a did from run
 the 327-D obs, so their normalizers are compatible. A 61-D checkpoint needs
 `MICRODUCK_WARM_START_EXPAND_OBS=1` (§5).
 
+The down policy's own task is `Mjlab-StairsDown-HeadRoll-Backlash-MicroDuck`. Fine-tuning
+`stairs_down.pt` on plain `Mjlab-StairsDown-Backlash-MicroDuck` drops the head terms, and the head
+will probably wobble again. Save every 50 iterations and pick a checkpoint with the battery. The
+last checkpoint of a run can sit anywhere in the run's spread (§30).
+
 ## Open problems
 
 - **No clean descent inside one policy.** The switch is required, and distillation lost both
   skills (§29).
 - **The crouch** was never learned by reward in the walking policy (§23–§25); the down policy's is
-  fixed at 104–108 mm, not riser-scaled (§28). Going down still touches 0.55–0.59 edges per riser,
-  mostly a foot tipped over the nose (§28, §29).
+  fixed at 101–108 mm, not riser-scaled (§28, §30). Going down still touches 0.34–0.38 edges per
+  riser (18d: 0.58–0.61), mostly a foot tipped over the nose (§28, §30).
+- **Head yaw still swings** 17° rms (18d 27°), and head pitch 19–20° rms. Pitch is the step-off's
+  counterweight. On 18d, holding head yaw and roll at zero with no retraining cost 11–17 of 200
+  robots at 3–5 cm; holding roll alone cost nothing (§30).
 - **Stiff terrain:** the final policies were run on softened contacts only (solref 0.04).
 - **Hardware and runtime:** a 327-D policy kind, the height map built in `robotd` from the ToF and
   leg odometry, a `publish` perception kind (§7, §15), and a check of the sim ToF model against real
@@ -291,7 +369,11 @@ the 327-D obs, so their normalizers are compatible. A 61-D checkpoint needs
   back the robot re-reads cells written under a different odometry error. In run 12's round trip,
   clearing the map at the turn cut falls going down from 28 % to 0 % at 3 cm (§19). The runtime map
   has to forget: clear it at a turn-around or a skill switch, or age cells out.
-- **Heading:** the batteries run with no heading hold, and 6–12 % of the down policy's robots leave
-  the 2 m wide staircase sideways (§28). Real use needs a heading hold.
+- **Heading:** the batteries run with no heading hold, and 6–12 % of 18d's robots leave the 2 m wide
+  staircase sideways (§28). For the head-roll policy it is 26 / 16 / 14 / 10 / 16 % at 2–6 cm (18d's
+  best checkpoint on the same run: 13 / 8 / 7 / 6 / 11 %), and the count swings 12–60 between
+  checkpoints of one run (§30). Real use needs a heading hold.
+- **The playground still runs 11b** ([`docs/playground.md`](playground.md)). 11b does not descend at
+  all (§18).
 - **Choice of climber:** 13b (anchored to 11b) climbed long stairs better than its siblings (§20). It
   was never compared with run 15 on the leg-collision model or in the switch.
